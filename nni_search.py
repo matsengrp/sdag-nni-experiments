@@ -436,11 +436,11 @@ def quick_test(fasta_path_, newick_path_, mmap_path_, final_newick_path_, final_
     nni_engine.set_no_filter(True)
     seed_tree_set = inst.currently_loaded_trees_with_gp_branch_lengths()
     seed_trees = []
-    print("seed trees:")
     for tree in seed_tree_set.trees:
         seed_trees.append(tree)
 
     tree_cnt = 0
+    print("seed trees:")
     for tree in seed_trees:
         newick = tree.to_newick()
         llh = inst.compute_tree_likelihood(tree)
@@ -448,6 +448,7 @@ def quick_test(fasta_path_, newick_path_, mmap_path_, final_newick_path_, final_
         print(tree_cnt, llh, prs, newick)
         tree_cnt += 1
 
+    # (3) contains
     inst_3 = create_gp_inst(fasta_path_, final_newick_path_, final_mmap_path_)
     init_gp_inst(inst_3)
     inst_3.take_first_branch_length()
@@ -465,11 +466,13 @@ def quick_test(fasta_path_, newick_path_, mmap_path_, final_newick_path_, final_
     inst_2.tp_engine_set_branch_lengths_by_taking_first()
     nni_engine_2 = inst_2.get_nni_engine()
     tp_engine_2 = inst_2.get_tp_engine()
-    tp_engine_2.optimize_branch_lengths()
     dag_2 = inst_2.get_dag()
     nni_engine_2.set_tp_likelihood_cutoff_filtering_scheme(
         tp_like_cutoff_threshold)
     nni_engine_2.set_no_filter(True)
+
+    print("dag:", dag.node_count(), dag.edge_count())
+    print("dag_2:", dag_2.node_count(), dag_2.edge_count())
 
     nni_engine_2.run_init()
     nni_engine_2.run_main_loop()
@@ -481,11 +484,36 @@ def quick_test(fasta_path_, newick_path_, mmap_path_, final_newick_path_, final_
     nni_engine.filter_pre_update()
     nni_engine.filter_eval_adjacent_nnis()
     nni_engine.filter_post_update()
-    tp_engine.optimize_branch_lengths()
 
-    print("dag:", dag.node_count(), dag.edge_count())
-    print("branch_lengths:", len(tp_engine.get_branch_lengths()),
-          tp_engine.get_branch_lengths())
+    tp_engine.optimize_branch_lengths(False)
+    tp_engine_2.optimize_branch_lengths(False)
+    inst.tp_engine_set_branch_lengths_by_taking_first()
+    inst_2.tp_engine_set_branch_lengths_by_taking_first()
+
+    # print("=> before rerun init()")
+    # nni_cnt = 0
+    # for nni in adj_nnis:
+    #     sc1 = nni_engine.get_score_by_nni(nni)
+    #     sc2 = nni_engine_2.get_score_by_nni(nni)
+    #     edge_id = dag_2.get_edge_id(nni)
+    #     top_tree = tp_engine_2.get_top_tree_with_edge(edge_id)
+    #     llh = inst_2.compute_tree_likelihood(top_tree)
+    #     prs = inst_2.compute_tree_parsimony(top_tree)
+    #     tree_newick = top_tree.to_newick()
+    #     dag_newick = dag_2.tree_to_newick_topology(top_tree)
+    #     contains_nni = dag_3.contains_nni(nni)
+    #     contains_parent = dag_3.contains_node(nni.parent())
+    #     contains_child = dag_3.contains_node(nni.child())
+    #     contains_nodes = contains_parent and contains_child
+    #     print(nni_cnt, "sc1:", sc1, "sc2:", sc2, "llh:", llh, "prs:", prs)
+    #     print(nni_cnt, tree_newick)
+
+    # nni_engine.run_init()
+    # nni_engine_2.run_init()
+
+    print("dag_2:", dag_2.node_count(), dag_2.edge_count())
+    print("branch_lengths_2:", len(tp_engine_2.get_branch_lengths()),
+          tp_engine_2.get_branch_lengths())
 
     data = []
 
@@ -497,25 +525,26 @@ def quick_test(fasta_path_, newick_path_, mmap_path_, final_newick_path_, final_
         top_tree = tp_engine_2.get_top_tree_with_edge(edge_id)
         llh = inst_2.compute_tree_likelihood(top_tree)
         prs = inst_2.compute_tree_parsimony(top_tree)
+        tree_newick = top_tree.to_newick()
+        dag_newick = dag_2.tree_to_newick_tree(top_tree)
         contains_nni = dag_3.contains_nni(nni)
         contains_parent = dag_3.contains_node(nni.parent())
         contains_child = dag_3.contains_node(nni.child())
         contains_nodes = contains_parent and contains_child
+        print(nni_cnt, "sc1:", sc1, "sc2:", sc2, "llh:", llh, "prs:", prs)
+        print(nni_cnt, tree_newick)
 
-        posterior_rank = -np.inf
+        post_rank = -np.inf
         topo_cnt = 0
         for final_tree in final_trees:
             if top_tree.compare_by_topology(final_tree):
-                contains_tree = topo_cnt
+                post_rank = topo_cnt
                 break
             topo_cnt += 1
 
-        tree_newick = top_tree.to_newick()
-        dag_newick = dag_3.tree_to_newick_topology(top_tree)
         print(nni_cnt, tree_newick)
         data.append([edge_id, sc1, sc2, llh, prs,
-                    contains_nni, posterior_rank, dag_newick])
-        # print("data:", data)
+                    contains_nni, post_rank, dag_newick])
         nni_cnt += 1
 
     df = pd.DataFrame(data)
