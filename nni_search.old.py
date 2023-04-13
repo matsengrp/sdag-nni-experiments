@@ -5,6 +5,7 @@ import numpy as np
 import pprint
 import bito.beagle_flags as beagle_flags
 import bito.phylo_model_mapkeys as model_keys
+import pandas as pd
 
 SIMPLE_SPECIFICATION = bito.PhyloModelSpecification(
     substitution="JC69", site="constant", clock="none"
@@ -314,7 +315,7 @@ def find_trees_in_dag(dag, tree_collection):
     return trees_found / tree_counter
 
 
-def run_nni_expansion_until_all_trees_found(fasta_path_, newick_path_, mmap_path_, final_newick_path_):
+def run_nni_expansion_until_all_trees_found(fasta_path_, newick_path_, mmap_path_, final_newick_path_, final_mmap_path_):
     print("=== RUN_NNI_EXPANSION ===")
     print("=== load ===")
     inst = create_gp_inst(fasta_path_, newick_path_, mmap_path_)
@@ -323,10 +324,35 @@ def run_nni_expansion_until_all_trees_found(fasta_path_, newick_path_, mmap_path
     nni_engine.set_no_filter(True)
     tp_engine = inst.get_tp_engine()
     dag = inst.get_dag()
+    node_bitsets = dag.build_sorted_vector_of_node_bitsets()
+    edge_bitsets = dag.build_sorted_vector_of_edge_bitsets()
+
+    truth_inst = create_gp_inst(
+        fasta_path_, final_newick_path_, final_mmap_path_)
+    init_gp_inst(truth_inst)
+    truth_dag = truth_inst.get_dag()
+    truth_node_bitsets = truth_dag.build_sorted_vector_of_node_bitsets()
+    truth_edge_bitsets = truth_dag.build_sorted_vector_of_edge_bitsets()
 
     truth_sbn_inst = bito.rooted_instance("truth")
     truth_sbn_inst.read_fasta_file(str(fasta_path_))
     truth_sbn_inst.read_newick_file(str(final_newick_path_))
+
+    print("node_bitsets:", dag.node_count(), truth_dag.node_count())
+    cover_node_count = 0
+    for bitset in truth_node_bitsets:
+        contains = dag.contains_node(bitset)
+        if contains:
+            cover_node_count += 1
+    print("nodes_covered:", cover_node_count, "of", truth_dag.node_count())
+
+    print("edge_bitsets:", dag.edge_count(), truth_dag.edge_count())
+    cover_edge_count = 0
+    for bitset in truth_edge_bitsets:
+        contains = dag.contains_edge(bitset)
+        if contains:
+            cover_edge_count += 1
+    print("edges_covered:", cover_edge_count, "of", truth_dag.edge_count())
 
     iterations = 0
     found_all_trees = False
@@ -337,36 +363,200 @@ def run_nni_expansion_until_all_trees_found(fasta_path_, newick_path_, mmap_path
         iterations += 1
         print("dag:", dag.node_count(), dag.edge_count())
         print("iterations:", iterations)
-        # nni_engine.sync_adjacent_nnis_with_dag()
-        # print("adj_nnis:", nni_engine.adjacent_nni_count())
-        # nni_engine.filter_eval_adjacent_nnis()
-        # nni_engine.filter_process_adjacent_nnis()
-        # nni_engine.add_accepted_nnis_to_dag()
-        # print("add_trees:")
-        # for nni in nni_engine.adjacent_nnis():
-        #     pass
-        nni_engine.test_add_adjacent_nnis_to_dag()
+        nni_engine.sync_adjacent_nnis_with_dag()
+        print("adj_nnis:", nni_engine.adjacent_nni_count())
+        nni_engine.filter_eval_adjacent_nnis()
+        accepted_nni_cnt = 0
+        accepted_nnis = {}
+        adj_nnis = nni_engine.adjacent_nnis()
+
+        for nni in adj_nnis:
+            contains_nni = truth_dag.contains_nni(nni)
+            contains_parent = truth_dag.contains_node(nni.parent())
+            contains_child = truth_dag.contains_node(nni.child())
+            contains_nni = contains_parent and contains_child
+            accepted_nni_cnt += contains_nni
+            accepted_nnis[nni] = contains_nni
+
+        print("found_nnis:", accepted_nni_cnt)
+        if accepted_nni_cnt == 0:
+            for nni in adj_nnis:
+                accepted_nnis[nni] = True
+
+        nni_engine.test_eval_adjacent_nnis(accepted_nnis)
+
+        print("accepted_nnis:", nni_engine.accepted_nni_count())
+        nni_engine.add_accepted_nnis_to_dag()
+        # nni_engine.test_add_adjacent_nnis_to_dag()
         print("check_trees:")
         perc_trees_found = find_trees_in_dag(
             dag, truth_sbn_inst.tree_collection)
         print("perc_trees_found:", perc_trees_found)
         if (perc_trees_found == 1.0):
             found_all_trees = True
-        # top_trees = tp_engine.build_vector_of_unique_top_trees()
-        # print("num_top_trees: ", len(top_trees))
-        # tree_count = 0
-        # for top_tree in top_trees:
-        #     print(top_tree.to_newick())
-        #     tree_count += 1
-        # likelihood = inst.compute_tree_likelihood(top_tree)
-        # parsimony = inst.compute_tree_parsimony(top_tree)
-        # print("top_tree:", likelihood, parsimony)
-        # exit()
+        top_trees = tp_engine.build_vector_of_unique_top_trees()
+        print("num_top_trees: ", len(top_trees))
+        tree_count = 0
+        fp = open("test_output.iter-{}.txt".format(iterations), 'w')
+        for top_tree in top_trees:
+            print(tree_count, dag.tree_to_newick_topology(top_tree))
+            fp.write(dag.tree_to_newick_topology(top_tree))
+            tree_count += 1
+        fp.close()
     print("=== end search ===")
 
+    fp = open("test_output.final.txt", 'w')
+    top_tree_cnt = 0
+    for top_tree in tp_engine.build_vector_of_unique_top_trees():
+        likelihood = inst.compute_tree_likelihood(top_tree)
+        parsimony = inst.compute_tree_parsimony(top_tree)
 
-run_nni_expansion_until_all_trees_found(
-    fasta_path, seed_newick_path, mmap_path, truth_newick_path)
+        line = "{}, {}, {}, {}".format(
+            top_tree_cnt, likelihood, parsimony, dag.tree_to_newick_topology(
+                top_tree)
+        )
+        fp.write(line)
+        print(line)
+        top_tree_cnt += 1
+    fp.close()
+
+
+def quick_test(fasta_path_, newick_path_, mmap_path_, final_newick_path_, final_mmap_path_):
+    print("=== RUN_NNI_EXPANSION ===")
+    print("=== load ===")
+    inst = create_gp_inst(fasta_path_, newick_path_, mmap_path_)
+    init_gp_inst(inst)
+    inst.take_first_branch_length()
+    inst.tp_engine_set_branch_lengths_by_taking_first()
+    nni_engine = inst.get_nni_engine()
+    tp_engine = inst.get_tp_engine()
+    dag = inst.get_dag()
+    nni_engine.set_tp_likelihood_cutoff_filtering_scheme(
+        tp_like_cutoff_threshold)
+    nni_engine.set_no_filter(True)
+    seed_tree_set = inst.currently_loaded_trees_with_gp_branch_lengths()
+    seed_trees = []
+    for tree in seed_tree_set.trees:
+        seed_trees.append(tree)
+
+    tree_cnt = 0
+    print("seed trees:")
+    for tree in seed_trees:
+        newick = tree.to_newick()
+        llh = inst.compute_tree_likelihood(tree)
+        prs = inst.compute_tree_parsimony(tree)
+        print(tree_cnt, llh, prs, newick)
+        tree_cnt += 1
+
+    # (3) contains
+    inst_3 = create_gp_inst(fasta_path_, final_newick_path_, final_mmap_path_)
+    init_gp_inst(inst_3)
+    inst_3.take_first_branch_length()
+    inst_3.tp_engine_set_branch_lengths_by_taking_first()
+    dag_3 = inst_3.make_dag()
+    dag_3 = inst_3.get_dag()
+    final_trees_set = inst_3.currently_loaded_trees_with_gp_branch_lengths()
+    final_trees = []
+    for tree in final_trees_set.trees:
+        final_trees.append(tree)
+
+    inst_2 = create_gp_inst(fasta_path_, newick_path_, final_mmap_path_)
+    init_gp_inst(inst_2)
+    inst_2.take_first_branch_length()
+    inst_2.tp_engine_set_branch_lengths_by_taking_first()
+    nni_engine_2 = inst_2.get_nni_engine()
+    tp_engine_2 = inst_2.get_tp_engine()
+    dag_2 = inst_2.get_dag()
+    nni_engine_2.set_tp_likelihood_cutoff_filtering_scheme(
+        tp_like_cutoff_threshold)
+    nni_engine_2.set_no_filter(True)
+
+    print("dag:", dag.node_count(), dag.edge_count())
+    print("dag_2:", dag_2.node_count(), dag_2.edge_count())
+
+    nni_engine_2.run_init()
+    nni_engine_2.run_main_loop()
+    nni_engine_2.run_post_loop()
+
+    nni_engine.run_init()
+    nni_engine.sync_adjacent_nnis_with_dag()
+    adj_nnis = nni_engine.adjacent_nnis()
+    nni_engine.filter_pre_update()
+    nni_engine.filter_eval_adjacent_nnis()
+    nni_engine.filter_post_update()
+
+    tp_engine.optimize_branch_lengths(False)
+    tp_engine_2.optimize_branch_lengths(False)
+    inst.tp_engine_set_branch_lengths_by_taking_first()
+    inst_2.tp_engine_set_branch_lengths_by_taking_first()
+
+    # print("=> before rerun init()")
+    # nni_cnt = 0
+    # for nni in adj_nnis:
+    #     sc1 = nni_engine.get_score_by_nni(nni)
+    #     sc2 = nni_engine_2.get_score_by_nni(nni)
+    #     edge_id = dag_2.get_edge_id(nni)
+    #     top_tree = tp_engine_2.get_top_tree_with_edge(edge_id)
+    #     llh = inst_2.compute_tree_likelihood(top_tree)
+    #     prs = inst_2.compute_tree_parsimony(top_tree)
+    #     tree_newick = top_tree.to_newick()
+    #     dag_newick = dag_2.tree_to_newick_topology(top_tree)
+    #     contains_nni = dag_3.contains_nni(nni)
+    #     contains_parent = dag_3.contains_node(nni.parent())
+    #     contains_child = dag_3.contains_node(nni.child())
+    #     contains_nodes = contains_parent and contains_child
+    #     print(nni_cnt, "sc1:", sc1, "sc2:", sc2, "llh:", llh, "prs:", prs)
+    #     print(nni_cnt, tree_newick)
+
+    # nni_engine.run_init()
+    # nni_engine_2.run_init()
+
+    print("dag_2:", dag_2.node_count(), dag_2.edge_count())
+    print("branch_lengths_2:", len(tp_engine_2.get_branch_lengths()),
+          tp_engine_2.get_branch_lengths())
+
+    data = []
+
+    nni_cnt = 0
+    for nni in adj_nnis:
+        sc1 = nni_engine.get_score_by_nni(nni)
+        sc2 = nni_engine_2.get_score_by_nni(nni)
+        edge_id = dag_2.get_edge_id(nni)
+        top_tree = tp_engine_2.get_top_tree_with_edge(edge_id)
+        llh = inst_2.compute_tree_likelihood(top_tree)
+        prs = inst_2.compute_tree_parsimony(top_tree)
+        tree_newick = top_tree.to_newick()
+        dag_newick = dag_2.tree_to_newick_tree(top_tree)
+        contains_nni = dag_3.contains_nni(nni)
+        contains_parent = dag_3.contains_node(nni.parent())
+        contains_child = dag_3.contains_node(nni.child())
+        contains_nodes = contains_parent and contains_child
+        print(nni_cnt, "sc1:", sc1, "sc2:", sc2, "llh:", llh, "prs:", prs)
+        print(nni_cnt, tree_newick)
+
+        post_rank = -np.inf
+        topo_cnt = 0
+        for final_tree in final_trees:
+            if top_tree.compare_by_topology(final_tree):
+                post_rank = topo_cnt
+                break
+            topo_cnt += 1
+
+        print(nni_cnt, tree_newick)
+        data.append([edge_id, sc1, sc2, llh, prs,
+                    contains_nni, post_rank, dag_newick])
+        nni_cnt += 1
+
+    df = pd.DataFrame(data)
+    print("DataFrame")
+    fp = open("test_output.csv", 'w')
+    fp.write(df.to_csv())
+    fp.close()
+    return data
+
+
+test_data = quick_test(
+    fasta_path, seed_newick_path, mmap_path, truth_newick_path, truth_mmap_path)
 exit()
 
 
@@ -385,7 +575,7 @@ truth_inst.take_first_branch_length()
 
 nni_engine = inst.get_nni_engine()
 nni_engine.set_gp_likelihood_cutoff_filtering_scheme(gp_cutoff_threshold)
-# nni_engine.set_tp_likelihood_cutoff_filtering_scheme(tp_like_cutoff_threshold)
+nni_engine.set_tp_likelihood_cutoff_filtering_scheme(tp_like_cutoff_threshold)
 # nni_engine.set_tp_parsimony_cutoff_filtering_scheme(tp_pars_cutoff_threshold)
 
 print("=== FIND TREES ===")
@@ -435,15 +625,6 @@ for tree in loaded_trees:
     print("likelihood:", likelihood, "parsimony:", parsimony)
     # print(tree.to_newick_topology())
 
-# trees_found = 0
-# for top_tree in unique_trees:
-#     for loaded_tree in loaded_trees:
-#         if top_tree == loaded_tree:
-#             likelihood = inst.compute_tree_likelihood(top_tree)
-#             parsimony = inst.compute_tree_parsimony(top_tree)
-#             print("likelihood:", likelihood, "parsimony:", parsimony)
-#             trees_found += 1
-
 print("loaded_trees_found:", trees_found)
 
 print("=== COMPARE SCORES ===")
@@ -455,7 +636,7 @@ for i in range(dag.edge_count()):
     edge_id = bito.edge_id(i)
     nni = dag.get_nni(edge_id)
     for other_nni in scored_nnis.keys():
-        if nni.compare(other_nni):
+        if nni == other_nni:
             top_tree = tp_engine.get_top_tree_with_edge(edge_id)
             likelihood = inst.compute_tree_likelihood(top_tree)
             parsimony = inst.compute_tree_parsimony(top_tree)
