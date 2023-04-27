@@ -162,13 +162,13 @@ def init_engine_for_gp_search(dag_inst, args):
     dag_inst.estimate_branch_lengths(1e-5, 3)
 
 
-def init_engine_for_tp_search(dag_inst, include_rootsplits):
+def init_engine_for_tp_search(dag_inst, args):
     dag_inst.make_tp_engine()
     dag_inst.make_nni_engine()
     dag_inst.tp_engine_set_branch_lengths_by_taking_first()
     dag_inst.tp_engine_set_choice_map_by_taking_first()
     nni_engine = dag_inst.get_nni_engine()
-    nni_engine.set_include_rootsplits(include_rootsplits)
+    nni_engine.set_include_rootsplits(args.include_rootsplits)
     nni_engine.set_tp_likelihood_cutoff_filtering_scheme(0.0)
     nni_engine.set_top_n_score_filtering_scheme(1)
 
@@ -202,85 +202,6 @@ def build_and_save_pcsp_pp_map(args):
     return pcsp_pp_map
 
 
-def nni_search__with_additional_nni_info(args):
-    print_v("# load trees...")
-    tree_inst, trees = load_trees(args.fasta, args.credible_newick)
-    print_v("# load pps...")
-    pps = load_pps(args.pp_csv)
-    print_v("# build maps...")
-    tree_id_map = build_tree_id_map(trees)
-    tree_pp_map = build_tree_pp_map(tree_id_map, pps)
-    pcsp_pp_map = load_pcsp_pp_map(args.pcsp_pp_csv)
-
-    final_dict = final_data_init()
-    dfs = {}
-
-    iter_count = 0
-    for iter_count in range(args.iter_max):
-        print_v(f"# iter_count: {iter_count} of {args.iter_max}...")
-        dag_inst, _ = load_dag(args.fasta, args.seed_newick)
-        dag = dag_inst.get_dag()
-        for nni in final_dict['added_nni']:
-            dag.add_node_pair(nni.get_parent(), nni.get_child())
-        print_v("# dag:", dag.node_count(), dag.edge_count())
-        tree_pp = get_tree_pp(dag, tree_id_map, tree_pp_map)
-        print_v("# dag_tree_pp:", tree_pp)
-        print_v("# init eval engine...")
-        if args.tp:
-            init_engine_for_tp_search(dag_inst, args.include_rootsplits)
-        if args.gp:
-            init_engine_for_gp_search(dag_inst, args.include_rootsplits)
-        nni_engine = dag_inst.get_nni_engine()
-        print_v("# init nni search...")
-        nni_engine.run_init(True)
-        nni_engine.graft_adjacent_nnis_to_dag()
-        nni_engine.filter_pre_update()
-        nni_engine.filter_eval_adjacent_nnis()
-        nni_engine.filter_post_update()
-        nni_engine.filter_process_adjacent_nnis()
-        nni_engine.remove_all_graft_nnis_from_dag()
-        scored_nni_map = nni_engine.scored_nnis()
-        scored_nnis = sorted(scored_nni_map.items(),
-                             key=lambda x: x[1], reverse=True)
-        print_v("# scored_nnis:", scored_nnis)
-        print_v("# accepted_nnis:", nni_engine.accepted_nni_count())
-        for nni in nni_engine.accepted_nnis():
-            print_v(nni.get_parent().subsplit_to_string(),
-                    nni.get_child().subsplit_to_string(), scored_nni_map[nni])
-        if args.nni_info:
-            nni_info_df = nni_df_add_entry(**locals())
-
-        for nni in nni_engine.accepted_nnis():
-            best_nni = nni
-            best_pcsp_pp = get_pcsp_pp(best_nni, pcsp_pp_map)
-            pcsp_rank = 0
-            for nni, score in scored_nnis:
-                nni_pcsp_pp = get_pcsp_pp(nni, pcsp_pp_map)
-                if nni_pcsp_pp > best_pcsp_pp:
-                    pcsp_rank += 1
-            final_dict['iter'].append(iter_count)
-            final_dict['tree_pp'].append(tree_pp)
-            final_dict['pcsp_pp_rank'].append(pcsp_rank)
-            final_dict['added_nni'].append(best_nni)
-            final_dict['adj_nni_count'].append(nni_engine.adjacent_nni_count())
-            final_dict['parent'].append(
-                best_nni.get_parent().subsplit_to_string())
-            final_dict['child'].append(
-                best_nni.get_child().subsplit_to_string())
-            iter_count += 1
-        if len(nni_engine.accepted_nnis()) == 0:
-            print_v("# NO ACCEPTED NNIS")
-            break
-
-    del final_dict['added_nni']
-    print_v("# final_dict: ", final_dict)
-    print_v("# final dataframe:")
-    df = pd.DataFrame(final_dict)
-    print_v(df)
-    df.to_csv(args.output)
-    return final_dict
-
-
 def nni_search(args):
     print_v("# load trees...")
     tree_inst, trees = load_trees(args.fasta, args.credible_newick)
@@ -297,9 +218,9 @@ def nni_search(args):
     dag = dag_inst.get_dag()
     print_v("# init engine...")
     if args.tp:
-        init_engine_for_tp_search(dag_inst, args.include_rootsplits)
+        init_engine_for_tp_search(dag_inst, args)
     if args.gp:
-        init_engine_for_gp_search(dag_inst, args.include_rootsplits)
+        init_engine_for_gp_search(dag_inst, args)
     nni_engine = dag_inst.get_nni_engine()
     nni_engine.run_init(True)
 
@@ -312,13 +233,15 @@ def nni_search(args):
         print_v("# dag:", dag.node_count(), dag.edge_count())
         tree_pp = get_tree_pp(dag, tree_id_map, tree_pp_map)
         print_v("# dag_tree_pp:", tree_pp)
-        # nni_engine.run_init(True)
+        if args.gp:
+            nni_engine.run_init(True)
         nni_engine.graft_adjacent_nnis_to_dag()
         nni_engine.filter_pre_update()
         nni_engine.filter_eval_adjacent_nnis()
         nni_engine.filter_post_update()
         nni_engine.filter_process_adjacent_nnis()
         nni_engine.remove_all_graft_nnis_from_dag()
+        nni_engine.add_accepted_nnis_to_dag(False)
         scored_nnis = nni_engine.scored_nnis()
         accepted_nni_count = len(nni_engine.accepted_nnis())
         print_v("# scored_nnis:", len(scored_nnis), scored_nnis)
@@ -576,7 +499,7 @@ if __name__ == "__main__":
         if (args.tp):
             nni_search(args)
         if (args.gp):
-            nni_search__with_additional_nni_info(args)
+            nni_search(args)
         if (args.pcsp):
             nni_search__choose_by_best_pcsp_pp(args)
     if (args.program == 'build_pcsp_map'):
