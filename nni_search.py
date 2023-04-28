@@ -159,7 +159,13 @@ def init_engine_for_gp_search(dag_inst, args):
     nni_engine.set_include_rootsplits(args.include_rootsplits)
     nni_engine.set_gp_likelihood_cutoff_filtering_scheme(0.0)
     nni_engine.set_top_n_score_filtering_scheme(1)
-    dag_inst.estimate_branch_lengths(1e-5, 3)
+    if args.use_cutoff:
+        nni_engine.set_gp_likelihood_cutoff_filtering_scheme(args.threshold)
+    if args.use_dropoff:
+        nni_engine.set_gp_likelihood_drop_filtering_scheme(args.threshold)
+    if args.use_top_n:
+        nni_engine.set_top_n_score_filtering_scheme(args.top_n)
+    dag_inst.estimate_branch_lengths(1e-5, 3, True)
 
 
 def init_engine_for_tp_search(dag_inst, args):
@@ -171,6 +177,12 @@ def init_engine_for_tp_search(dag_inst, args):
     nni_engine.set_include_rootsplits(args.include_rootsplits)
     nni_engine.set_tp_likelihood_cutoff_filtering_scheme(0.0)
     nni_engine.set_top_n_score_filtering_scheme(1)
+    if args.use_cutoff:
+        nni_engine.set_tp_likelihood_cutoff_filtering_scheme(args.threshold)
+    if args.use_dropoff:
+        nni_engine.set_tp_likelihood_drop_filtering_scheme(args.threshold)
+    if args.use_top_n:
+        nni_engine.set_top_n_score_filtering_scheme(args.top_n)
 
 
 def build_and_save_pcsp_pp_map(args):
@@ -202,7 +214,30 @@ def build_and_save_pcsp_pp_map(args):
     return pcsp_pp_map
 
 
+def final_data_init():
+    final_data = {
+        'iter': [],
+        'acc_nni_id': [],
+        'acc_nni_count': [],
+        'score': [],
+        'tree_pp': [],
+        'pcsp_pp': [],
+        'pcsp_pp_rank': [],
+        'node_count': [],
+        'edge_count': [],
+        'cred_edge_count': [],
+        'tree_count': [],
+        'adj_nni_count': [],
+        'new_nni_count': [],
+        'llhs_computed': [],
+        'parent': [],
+        'child': []
+    }
+    return final_data
+
+
 def nni_search(args):
+    print("nni_search")
     print_v("# load trees...")
     tree_inst, trees = load_trees(args.fasta, args.credible_newick)
     print_v("# load pps...")
@@ -234,18 +269,29 @@ def nni_search(args):
         tree_pp = get_tree_pp(dag, tree_id_map, tree_pp_map)
         print_v("# dag_tree_pp:", tree_pp)
         if args.gp:
+            init_engine_for_gp_search(dag_inst, args)
+            nni_engine = dag_inst.get_nni_engine()
             nni_engine.run_init(True)
-        nni_engine.graft_adjacent_nnis_to_dag()
-        nni_engine.filter_pre_update()
-        nni_engine.filter_eval_adjacent_nnis()
-        nni_engine.filter_post_update()
-        nni_engine.filter_process_adjacent_nnis()
-        nni_engine.remove_all_graft_nnis_from_dag()
-        nni_engine.add_accepted_nnis_to_dag(False)
-        scored_nnis = nni_engine.scored_nnis()
-        accepted_nni_count = len(nni_engine.accepted_nnis())
-        print_v("# scored_nnis:", len(scored_nnis), scored_nnis)
-        print_v("# accepted_nnis:", nni_engine.accepted_nni_count())
+        if not args.pcsp:
+            nni_engine.graft_adjacent_nnis_to_dag()
+            nni_engine.filter_pre_update()
+            nni_engine.filter_eval_adjacent_nnis()
+            nni_engine.filter_post_update()
+            nni_engine.filter_process_adjacent_nnis()
+            nni_engine.remove_all_graft_nnis_from_dag()
+            nni_engine.add_accepted_nnis_to_dag(False)
+            scored_nnis = nni_engine.scored_nnis()
+            accepted_nni_count = len(nni_engine.accepted_nnis())
+            print_v("# scored_nnis:", len(scored_nnis), scored_nnis)
+            print_v("# accepted_nnis:", nni_engine.accepted_nni_count())
+        else:
+            for nni_id, nni in enumerate(nni_engine.adjacent_nnis()):
+                nni_pcsp_pp = get_pcsp_pp(nni, pcsp_pp_map)
+                nni_pcsp_map[nni] = nni_pcsp_pp
+                if nni_pcsp_pp > best_pcsp:
+                    best_pcsp = nni_pcsp_pp
+                    best_nni = nni
+            dag.add_node_pair(best_nni.get_parent(), best_nni.get_child())
 
         # add entry to final data
         new_nni_count = len(scored_nnis) - (prev_nni_count - 1)
@@ -300,66 +346,6 @@ def nni_search(args):
     return final_dict
 
 
-def nni_search__choose_by_best_pcsp_pp(args):
-    print_v("# parse args...")
-    args = parse_args__nni_search()
-    print_v("# load trees...")
-    tree_inst, trees = load_trees(args.fasta, args.credible_newick)
-    print_v("# load pps...")
-    pps = load_pps(args.pp_csv)
-    print_v("# build maps...")
-    tree_id_map = build_tree_id_map(trees)
-    tree_pp_map = build_tree_pp_map(tree_id_map, pps)
-    pcsp_pp_map = load_pcsp_pp_map(args.pcsp_pp_csv)
-
-    final_dict = {
-        'iter': [],
-        'tree_pp': [],
-        'added_nni': [],
-        'parent': [],
-        'child': [],
-    }
-
-    print_v("# load dag...")
-    dag_inst, _ = load_dag(args.fasta, args.seed_newick)
-    dag = dag_inst.get_dag()
-    dag_inst.make_nni_engine()
-    nni_engine = dag_inst.get_nni_engine()
-    nni_engine.set_include_rootsplits(include_rootsplits)
-
-    for iter_count in range(iter_max):
-        print_v(f"# iter_count: {iter_count} of {iter_max}...")
-        print_v("# dag:", dag.node_count(), dag.edge_count())
-        tree_pp = get_tree_pp(dag, tree_id_map, tree_pp_map)
-        print_v("# dag_tree_pp:", tree_pp)
-        nni_pcsp_map = {}
-
-        best_pcsp = -np.inf
-        nni_engine.sync_adjacent_nnis_with_dag()
-        adj_nnis = nni_engine.adjacent_nnis()
-        print_v("adj_nnis:", adj_nnis)
-        for nni_id, nni in enumerate(adj_nnis):
-            nni_pcsp_pp = get_pcsp_pp(nni, pcsp_pp_map)
-            nni_pcsp_map[nni] = nni_pcsp_pp
-            if nni_pcsp_pp > best_pcsp:
-                best_pcsp = nni_pcsp_pp
-                best_nni = nni
-        print_v("# nni_pcsp_map:", nni_pcsp_map)
-        dag.add_node_pair(best_nni.get_parent(), best_nni.get_child())
-        final_dict['iter'].append(iter_count)
-        final_dict['tree_pp'].append(tree_pp)
-        final_dict['added_nni'].append(best_nni)
-        final_dict['parent'].append(best_nni.get_parent().subsplit_to_string())
-        final_dict['child'].append(best_nni.get_child().subsplit_to_string())
-
-    del final_dict['added_nni']
-    print_v("# final dataframe:")
-    df = pd.DataFrame(final_dict)
-    print_v(df)
-    df.to_csv(f"_ignore/test.best_by_pcsp_pp.final.csv")
-    return final_dict
-
-
 def nni_df_add_entry(**kwargs):
     info_dict = {
         'iter': [iter_count] * len(scored_nnis),
@@ -407,28 +393,6 @@ def nni_df_add_entry(**kwargs):
     df.to_csv(f"{args.output}.{iter_count}")
     return df
 
-
-def final_data_init():
-    final_data = {
-        'iter': [],
-        'acc_nni_id': [],
-        'acc_nni_count': [],
-        'score': [],
-        'tree_pp': [],
-        'pcsp_pp': [],
-        'pcsp_pp_rank': [],
-        'node_count': [],
-        'edge_count': [],
-        'cred_edge_count': [],
-        'tree_count': [],
-        'adj_nni_count': [],
-        'new_nni_count': [],
-        'llhs_computed': [],
-        'parent': [],
-        'child': []
-    }
-    return final_data
-
 ############
 ### MAIN ###
 ############
@@ -445,7 +409,7 @@ def main_arg_parse(args):
 
     # nni search
     subparser1 = subparsers.add_parser(
-        'nni_search', help='Perform iterative NNI search.')
+        'nni-search', help='Perform systematic NNI search.')
     subparser1.add_argument('fasta', help='fasta file', type=str)
     subparser1.add_argument(
         'seed_newick', help='newick file for initial trees in DAG', type=str)
@@ -455,13 +419,29 @@ def main_arg_parse(args):
         'pp_csv', help='csv file containing the posterior weights of the trees from credible_trees', type=str)
     subparser1.add_argument(
         'pcsp_pp_csv', help='csv file containing the per-PCSP posterior weights', type=str)
-    group = subparser1.add_mutually_exclusive_group(required=True)
+    # search method group
+    group = subparser1.add_mutually_exclusive_group(
+        required=True)
     group.add_argument('--gp', action='store_true',
-                       help='Use generalized pruning.')
+                       help='Selects best NNI according to Generalized Pruning.')
     group.add_argument('--tp', action='store_true',
-                       help='Use top pruning via log likelihood.')
+                       help='Selects best NNI according to Top Pruning via Likelihood.')
     group.add_argument('--pcsp', action='store_true',
-                       help='Use by selecting the NNI with the best per-PCSP podsterior.')
+                       help='Selects best NNI according to per-PCSP cumulative posterior.')
+    # search scheme group
+    group = subparser1.add_mutually_exclusive_group(
+        required=False)
+    group.add_argument('--use-top-n', action='store_true',
+                       help='Selects the top N scoring NNIs.')
+    group.add_argument('--use-cutoff', action='store_true',
+                       help='Selects all NNIs scoring above a given threshold.')
+    group.add_argument('--use-dropoff', action='store_true',
+                       help='Selects all NNIs scoring above a given dropoff below best NNI.')
+    # search scheme arguments
+    subparser1.add_argument(
+        '--top-n', help='number of NNIs to accept per iteration', type=int, default=1)
+    subparser1.add_argument(
+        '--threshold', help='cutoff/dropoff threshold', type=float, default=0.0)
     # options
     subparser1.add_argument('-o', '--output', help='output file', type=str,
                             default='results.nni_search.csv')
@@ -469,14 +449,14 @@ def main_arg_parse(args):
         '--iter-max', help='number of NNI search iterations', type=int, default=10)
     subparser1.add_argument(
         '--nni-info', help='Give additional NNI info per iteration', type=str)
-    subparser1.add_argument(
-        '--tree-pp', help='Compute DAG pre-tree posterior every iteration', type=str)
+    # subparser1.add_argument(
+    #     '--tree-pp', action='store_true' help='Compute DAG pre-tree posterior every iteration')
     subparser1.add_argument("--include-rootsplits", action='store_true',
                             help='Whether to include rootsplits in NNI search')
 
     # pcsp map builder
     subparser2 = subparsers.add_parser(
-        'build_pcsp_map', help='Build per-PCSP map.')
+        'build-pcsp-map', help='Build per-PCSP map.')
     subparser2.add_argument('fasta', help='fasta file', type=str)
     subparser2.add_argument(
         'credible_newick', help='newick file for trees in credible posterior', type=str)
@@ -495,13 +475,13 @@ if __name__ == "__main__":
     print_v("# begin...")
     args = main_arg_parse(sys.argv[1:])
     verbose = (args.verbose > 0)
-    if (args.program == 'nni_search'):
+    if (args.program == 'nni-search'):
         if (args.tp):
             nni_search(args)
         if (args.gp):
             nni_search(args)
         if (args.pcsp):
-            nni_search__choose_by_best_pcsp_pp(args)
-    if (args.program == 'build_pcsp_map'):
+            nni_search(args)
+    if (args.program == 'build-pcsp-map'):
         build_and_save_pcsp_pp_map(args)
     print_v("# ...done")
