@@ -54,6 +54,10 @@ function prep_ds_data() {
     echo "# Calculating pcsp posterior weights via nni_search.py build-pcsp-map..."
     python nni_search.py build-pcsp-map $fasta $mb_trees $mb_pp $first_nwk -o $pcsp_pp
 
+    echo "# Copying fasta file to local directory..."
+    fasta="${golden_path}/ds"$ds"/${prior_type}/ds"$ds".fasta"
+    cp $fasta data/ds${ds}/ds${ds}.fasta
+    
     echo "# Finished processing files for ds${ds} in $prior_type."
 }
 
