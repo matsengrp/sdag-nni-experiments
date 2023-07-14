@@ -90,6 +90,23 @@ def sdag_results_df_of(
     tree_cred_map,
     tree_found_map,
 ):
+    """
+    Calculate sdag stats for topologies from Mr. Bayes.
+
+    Parameters:
+        seen_trees (list): The list of bito RootedTrees found by the short run of Mr.
+            Bayes, in the order of seen topologies.
+        max_topology_count (int): The maximum number of topologies for which to compute
+            sDAG statistics.
+        seen_topology_dir (str): The path of the directory with newick files for the
+            seen topologies.
+        tree_id_map (dict): The dictionary mapping tree_id to bito RootedTree.
+        tree_pp_map (dict): The dictionary mapping tree_id to posterior probability.
+        tree_cred_map (dict): The dictionary mapping tree_id to truth value of
+            membership of the credible set.
+        tree_found_map (dict): The dictionary mapping tree_id to truth value of the
+            tree being already found.
+    """
     rows_for_df = []
     topologies_path = lambda x: f"{seen_topology_dir}/topologies-seen.{x}.nwk"
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -135,9 +152,10 @@ def sdag_results_df_of(
 
 def restrict_to_dag(newick_path, tree_dicts):
     """
-    ...restrict the dictionaries to the trees that are in the sdag spanned by the topologies in newick path
-    ...done in-place...
-    ...assumes tree_id_map is the first entry, so tree_id to bito tree...
+    Given a list of tree dictionaries, the first of which is a tree_id_map (integer to
+    bito RootedTree), remove the entries of the dictionaries for trees that are not in
+    the sDAG spanned by the topologies in newick_path. The modification to the
+    dictionaries is done in-place
     """
     tree_id_map = tree_dicts[0]
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -171,6 +189,7 @@ def restrict_to_dag(newick_path, tree_dicts):
 @click.argument("posterior_newick_path", type=str)
 @click.argument("pp_csv", type=str)
 @click.argument("out_path", type=str)
+@click.option("--skip_sdag_stats", is_flag=True)
 def run(
     golden_pickle_path,
     topology_sequence_path,
@@ -179,17 +198,24 @@ def run(
     posterior_newick_path,
     pp_csv,
     out_path,
+    skip_sdag_stats=False,
 ):
     """
+    Calculate posterior and sdag stats for a short Mr. Bayes run. Optionally skip the
+    sdag stats, which take longer to compute.
 
     Parameters:
-        golden_pickle_path (str): ...like data/ds1/_output/posterior.pkl
-        topology_sequence_path (str): ...like like data/ds1/_output/short_mcmc/rerooted-topology-sequence.tab
-        fasta_path (str): ...like ${data_path}/ds${ds}.fasta
-        seed_newick_path (str): ...like ${results_path}/ds${ds}.top1.nwk
-        posterior_newick_path (str): like ${results_path}/ds${ds}.mb-trees.with-fake_branches.nwk
-        pp_csv (str): ...like${results_path}/ds${ds}.mb-pp.csv
-        out_path (str): ...
+        golden_pickle_path (str): Path to the pickled Mr. Bayes empirical posterior.
+        topology_sequence_path (str): Path to the rerooted topologies of the short Mr.
+            Bayes run.
+        fasta_path (str): Path to the fasta file.
+        seed_newick_path (str): Path to the file with the newick of the common topology
+            for multiple bito object instances.
+        posterior_newick_path (str): Path to the newick file of the posterior trees from
+            the long run of Mr. Bayes.
+        pp_csv (str): Path to the csv file with the posterior probababilities of the trees
+            in posterior_newick_path.
+        out_path (str): Write out path for the data.
     """
     # Gather the topologies visited by Mr Bayes.
     golden = golden_data_of_path(golden_pickle_path)
@@ -199,6 +225,10 @@ def run(
     )
     total_seen_count = accumulation_df.support_size.max()
     print(f"Accumulation dataframe built. Seen topology count: {total_seen_count}")
+
+    if skip_sdag_stats:
+        accumulation_df.to_csv(out_path)
+        return None
 
     # Get all posterior trees, then restrict to those in the largest sdag of MCMC trees.
     # The rest are never visited and don't contribute to any of the stats.
