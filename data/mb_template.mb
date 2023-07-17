@@ -8,7 +8,7 @@ begin mrbayes;
     set autoclose=yes nowarn=yes seed=8675 swapseed=309;
     lset nst=1 rates=equal;
     prset statefreqpr=fixed(equal) topologypr=uniform brlenspr={{brlenspr}};
-    mcmcp nruns=1 nchains=4 ngen=100000 samplefreq=1 printfreq=1000 diagnfreq=1 file=ds{{ds}};
+    mcmcp nruns=1 nchains=4 ngen={{generations}} samplefreq=1 printfreq=1000 diagnfreq=1 file=ds{{ds}};
     startvals tau = starttree V = starttree;
     mcmc;
 end;

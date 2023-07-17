@@ -509,8 +509,9 @@ def nni_search(args):
     Perform an nni-search based on command line arguments.
     """
     with tempfile.TemporaryDirectory() as temp_dir:
-        print("nni_search")
+        start_time = time.time()
 
+        print("nni_search")
         print_v("# load trees...")
         # tree_inst, trees = load_trees(args.fasta, args.posterior_newick)
         tree_inst, trees = load_trees_with_fake_first(
@@ -551,6 +552,8 @@ def nni_search(args):
 
         prev_nni_count = 0
         llhs_computed = 0
+        current_time = time.time() - start_time
+        iteration_times = [(0, current_time)]
         for iter_count in range(1, args.iter_max + 1):
             # run iteration of search
             log_this_iter = (iter_count % log_iteration_frequency) == 0
@@ -595,46 +598,52 @@ def nni_search(args):
                 llhs_computed += len(scored_nnis)
 
             if log_this_iter:
-                tree_count = int(dag.topology_count())
-                node_count = dag.node_count()
-                edge_count = dag.edge_count()
-                posterior_tree_ids = update_found_trees(
-                    dag, tree_id_map, tree_found_map
-                )
-                posterior_tree_ids = f'"{posterior_tree_ids}"'
-                tree_pp = get_tree_pp(tree_pp_map, tree_found_map)
-                cred_tree_count = get_credible_tree_count(tree_cred_map, tree_found_map)
-                cred_edge_count = get_credible_edge_count(dag, pcsp_cred_map)
-                adjacent_nni_count = nni_engine.adjacent_nni_count()
-                print_v("# dag_tree_pp:", tree_pp)
-
-                for nni_id, nni in enumerate(nni_engine.accepted_nnis()):
-                    pcsp_pp = get_pcsp_pp(nni, pcsp_pp_map)
-                    pcsp_pp_rank = get_pcsp_pp_rank(nni, scored_nnis, pcsp_pp_map)
-                    parent = nni.get_parent().subsplit_to_string()
-                    child = nni.get_child().subsplit_to_string()
-
-                    write_results_line(
-                        args.output,
-                        iter_count,
-                        nni_id,
-                        accepted_nni_count,
-                        scored_nnis[nni],
-                        tree_pp,
-                        pcsp_pp,
-                        pcsp_pp_rank,
-                        node_count,
-                        edge_count,
-                        cred_edge_count,
-                        tree_count,
-                        cred_tree_count,
-                        posterior_tree_ids,
-                        adjacent_nni_count,
-                        new_nni_count,
-                        llhs_computed,
-                        parent,
-                        child,
+                if args.log_time_only:
+                    current_time = time.time() - start_time
+                    iteration_times.append((iter_count, current_time))
+                else:
+                    tree_count = int(dag.topology_count())
+                    node_count = dag.node_count()
+                    edge_count = dag.edge_count()
+                    posterior_tree_ids = update_found_trees(
+                        dag, tree_id_map, tree_found_map
                     )
+                    posterior_tree_ids = f'"{posterior_tree_ids}"'
+                    tree_pp = get_tree_pp(tree_pp_map, tree_found_map)
+                    cred_tree_count = get_credible_tree_count(
+                        tree_cred_map, tree_found_map
+                    )
+                    cred_edge_count = get_credible_edge_count(dag, pcsp_cred_map)
+                    adjacent_nni_count = nni_engine.adjacent_nni_count()
+                    print_v("# dag_tree_pp:", tree_pp)
+
+                    for nni_id, nni in enumerate(nni_engine.accepted_nnis()):
+                        pcsp_pp = get_pcsp_pp(nni, pcsp_pp_map)
+                        pcsp_pp_rank = get_pcsp_pp_rank(nni, scored_nnis, pcsp_pp_map)
+                        parent = nni.get_parent().subsplit_to_string()
+                        child = nni.get_child().subsplit_to_string()
+
+                        write_results_line(
+                            args.output,
+                            iter_count,
+                            nni_id,
+                            accepted_nni_count,
+                            scored_nnis[nni],
+                            tree_pp,
+                            pcsp_pp,
+                            pcsp_pp_rank,
+                            node_count,
+                            edge_count,
+                            cred_edge_count,
+                            tree_count,
+                            cred_tree_count,
+                            posterior_tree_ids,
+                            adjacent_nni_count,
+                            new_nni_count,
+                            llhs_computed,
+                            parent,
+                            child,
+                        )
 
             # add entry for additional NNI info
             if args.nni_info:
@@ -648,6 +657,12 @@ def nni_search(args):
             nni_engine.sync_adjacent_nnis_with_dag()
             prev_nni_count = len(scored_nnis)
         print_v(f"# final dataframe written to {args.output}")
+
+        if args.log_time_only:
+            with open(f"{args.output}.time.csv", "w") as the_file:
+                the_file.write("iter,time\n")
+                for iter, seconds in iteration_times:
+                    the_file.write(f"{iter},{seconds}\n")
     return None
 
 
@@ -799,6 +814,11 @@ def main_arg_parse(args):
     )
     subparser1.add_argument(
         "--log-freq", help="frequency to log stats for the search", type=int, default=1
+    )
+    subparser1.add_argument(
+        "--log-time-only",
+        help="log run-time and no other statistics",
+        action="store_true",
     )
     subparser1.add_argument(
         "--nni-info", help="Give additional NNI info per iteration", type=str

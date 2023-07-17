@@ -7,7 +7,10 @@ import click
 @click.argument("initial_tree_path", type=str)
 @click.argument("branch_length_prior", type=str)
 @click.argument("out_path", type=str)
-def prepare_mb_run_file(ds, initial_tree_path, branch_length_prior, out_path):
+@click.option("--generations", type=str, default="100000")
+def prepare_mb_run_file(
+    ds, initial_tree_path, branch_length_prior, out_path, generations=100000
+):
     """
     Use the mb template file and the specified settings to create a Mr Baye file that is
     ready to run.
@@ -29,6 +32,7 @@ def prepare_mb_run_file(ds, initial_tree_path, branch_length_prior, out_path):
         "{{ds}}": ds,
         "{{starttree}}": initial_tree_newick,
         "{{brlenspr}}": branch_length_prior,
+        "{{generations}}": generations,
     }
     replacement_match = "(" + ")|(".join(replacement_dict.keys()) + ")"
     replacement_sub = lambda match: replacement_dict[match.group()]
