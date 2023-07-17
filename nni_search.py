@@ -875,10 +875,6 @@ if __name__ == "__main__":
         if args.pcsp:
             nni_search(args)
     if args.program == "build-pcsp-map":
-        # add this explanation somewhere...
-        # This can be a very lengthy calculation and does not depen the search method, so need only
-        # run it once per posterior...
-
         build_and_save_pcsp_pp_map_with_fake_first(
             args.fasta,
             args.posterior_newick,
