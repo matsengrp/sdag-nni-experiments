@@ -256,14 +256,24 @@ def load_pps(pp_path):
 
 def load_pcsp_pp_map(pcsp_pp_path):
     """
-    Reads the PCSP data in pcsp_pp_path and returns two default dictionaries. The first
-    is a dictionary mapping a PCSP (as a bito bitset object) to its posterior
+    Reads the PCSP data in pcsp_pp_path and returns three default dictionaries. The
+    first is a dictionary mapping a PCSP (as a bito bitset object) to its posterior
     probability, with default 0.0. The second is a dictionary mapping a PCSP to the
-    truth value for the PCSP appearing in a credible set topology.
+    truth value for the PCSP appearing in a credible set topology. The third is a
+    default dictionary, with default False, mapping a PCSP to the truth value of the
+    PCSP being found by a search method.
+
+    The purpose of the final dictionary is to take advantage of the fact that the search
+    methods enlarge the sDAG of the previous iteration. Once an edge is found in the
+    sDAG of an iteration of the search, the edge is present in the sDAGs of all future
+    iterations.
 
     The csv file pcsp_pp_path is expected to have columns "parent", "child", "pcsp_pp",
     and "in_cred_set", as prepared by the methods build_and_save_pcsp_pp_map and
-    build_and_save_pcsp_pp_map_with_fake_first.
+    build_and_save_pcsp_pp_map_with_fake_first. Note that since this is loading the data
+    from file, the credible set (95% by default) cannot be changed. I.e., if you want
+    edges with a different cutoff for the cumulative density of the credible set
+    topologies, then you need to rerun build build-pcsp-map.
     """
     to_subsplit = lambda clades: bito.subsplit(*clades)
     to_pcsp = lambda subsplits: bito.pcsp(*subsplits)
@@ -278,7 +288,8 @@ def load_pcsp_pp_map(pcsp_pp_path):
 
     pcsp_pp_map = defaultdict(float, df["pcsp_pp"].to_dict())
     pcsp_cred_map = defaultdict(bool, df["in_cred_set"].to_dict())
-    return pcsp_pp_map, pcsp_cred_map
+    pcsp_found_map = defaultdict(bool, {pcsp: False for pcsp in pcsp_pp_map})
+    return pcsp_pp_map, pcsp_cred_map, pcsp_found_map
 
 
 def build_tree_dicts(trees, pps, cred_pp=0.95):
@@ -361,13 +372,18 @@ def get_pcsp_pp_rank(best_nni, scored_nnis, pcsp_pp_map):
     return pcsp_pp_rank
 
 
-def get_credible_edge_count(dag, pcsp_cred_map):
+def get_credible_edge_count(pcsp_cred_map, pcsp_found_map):
     """
-    Returns the number of edges in the dag that are in topologies of the credible set.
+    Returns the number of sdag edges that are in topologies of the credible set and marked as found.
     """
-    pcsps = dag.build_set_of_edge_bitsets()
-    cred_edge_count = sum((pcsp_cred_map[pcsp] for pcsp in pcsps))
-    return cred_edge_count
+    return sum((pcsp_cred_map[pcsp] for pcsp, found in pcsp_found_map.items() if found))
+
+
+def get_posterior_edge_count(pcsp_found_map):
+    """
+    Returns the number of sdag edges that are in topologies of the posterior and marked as found.
+    """
+    return sum(pcsp_found_map.values())
 
 
 def get_tree_pp(tree_pp_map, tree_found_map):
@@ -415,6 +431,25 @@ def update_found_trees(dag, tree_id_map, tree_found_map):
     for tree_id in newly_found_tree_ids:
         tree_found_map[tree_id] = True
     return newly_found_tree_ids
+
+
+def update_found_edges(dag, pcsp_found_map):
+    """
+    Updates the pcsp_found_map dictionary to mark as found the edges contained in the
+    dag.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        pcsp_found_map (dict): The dictionary mapping a PCSP to truth value of the PCSP
+            being already found.
+    """
+    pcsps = dag.build_set_of_edge_bitsets()
+    newly_found_pcsps = (
+        pcsp for pcsp, found in pcsp_found_map.items() if not found and pcsp in pcsps
+    )
+    for pcsp in newly_found_pcsps:
+        pcsp_found_map[pcsp] = True
+    return None
 
 
 def build_ranked_list(list):
@@ -469,6 +504,7 @@ def init_results_file(
     tree_cred_map,
     tree_found_map,
     pcsp_cred_map,
+    pcsp_found_map,
 ):
     """
     Create a csv file at file_path and writes to this file the header line and sdag
@@ -481,14 +517,16 @@ def init_results_file(
     posterior_tree_ids = f'"{posterior_tree_ids}"'
     tree_pp = get_tree_pp(tree_pp_map, tree_found_map)
     cred_tree_count = get_credible_tree_count(tree_cred_map, tree_found_map)
-    cred_edge_count = get_credible_edge_count(dag, pcsp_cred_map)
+    cred_edge_count = get_credible_edge_count(pcsp_cred_map, pcsp_found_map)
+    posterior_edge_count = get_posterior_edge_count(pcsp_found_map)
 
     header = "iter,acc_nni_id,acc_nni_count,score,tree_pp,pcsp_pp,pcsp_pp_rank,"
-    header += "node_count,edge_count,cred_edge_count,tree_count,cred_tree_count,"
-    header += "posterior_tree_ids,adj_nni_count,new_nni_count,llhs_computed,parent,"
-    header += "child\n"
+    header += "node_count,edge_count,cred_edge_count,posterior_edge_count,tree_count,"
+    header += "cred_tree_count,posterior_tree_ids,adj_nni_count,new_nni_count,"
+    header += "llhs_computed,parent,child\n"
     first_row = f"0,,0,,{tree_pp},,,{node_count},{edge_count},{cred_edge_count},"
-    first_row += f"{tree_count},{cred_tree_count},{posterior_tree_ids},0,0,0,,\n"
+    first_row += f"{posterior_edge_count},{tree_count},{cred_tree_count},"
+    first_row += f"{posterior_tree_ids},0,0,0,,\n"
     with open(file_path, "w") as the_file:
         the_file.write(header)
         the_file.write(first_row)
@@ -525,7 +563,7 @@ def nni_search(args):
         tree_id_map, tree_pp_map, tree_cred_map, tree_found_map = build_tree_dicts(
             trees, pps
         )
-        pcsp_pp_map, pcsp_cred_map = load_pcsp_pp_map(args.pcsp_pp_csv)
+        pcsp_pp_map, pcsp_cred_map, pcsp_found_map = load_pcsp_pp_map(args.pcsp_pp_csv)
 
         print_v("# load dag...")
         dag_inst, dag = load_dag(args.fasta, args.seed_newick, temp_dir)
@@ -546,6 +584,7 @@ def nni_search(args):
             tree_cred_map,
             tree_found_map,
             pcsp_cred_map,
+            pcsp_found_map,
         )
 
         log_iteration_frequency = args.log_freq
@@ -613,7 +652,11 @@ def nni_search(args):
                     cred_tree_count = get_credible_tree_count(
                         tree_cred_map, tree_found_map
                     )
-                    cred_edge_count = get_credible_edge_count(dag, pcsp_cred_map)
+                    update_found_edges(dag, pcsp_found_map)
+                    cred_edge_count = get_credible_edge_count(
+                        pcsp_cred_map, pcsp_found_map
+                    )
+                    posterior_edge_count = get_posterior_edge_count(pcsp_found_map)
                     adjacent_nni_count = nni_engine.adjacent_nni_count()
                     print_v("# dag_tree_pp:", tree_pp)
 
@@ -635,6 +678,7 @@ def nni_search(args):
                             node_count,
                             edge_count,
                             cred_edge_count,
+                            posterior_edge_count,
                             tree_count,
                             cred_tree_count,
                             posterior_tree_ids,
