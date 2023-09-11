@@ -9,13 +9,19 @@ from collections import namedtuple
 import click
 from nni_search import (
     build_tree_dicts,
+    get_credible_edge_count,
+    get_credible_subsplit_count,
     get_credible_tree_count,
+    get_posterior_edge_count,
+    get_posterior_subsplit_count,
     get_tree_pp,
     load_pcsp_pp_map,
+    load_subsplit_map,
     load_pps,
     load_trees,
     load_trees_with_fake_first,
     update_found_edges,
+    update_found_nodes,
     update_found_trees,
 )
 
@@ -90,6 +96,8 @@ def sdag_results_df_of(
     tree_found_map,
     pcsp_cred_map,
     pcsp_found_map,
+    subsplit_cred_map,
+    subsplit_found_map,
 ):
     """
     Calculate sdag stats for topologies from Mr. Bayes.
@@ -111,6 +119,10 @@ def sdag_results_df_of(
             the truth value of the PCSP appearing in a topology of the credible set.
         pcsp_found_map (dict): The dictionary mapping a PCSP (as a bito bitset object)
             to the truth value of the PCSP being already found.
+        subsplit_cred_map (dict): The dictionary mapping a subsplit (as a bito bitset object) to
+            the truth value of the subsplit appearing in a topology of the credible set.
+        subsplit_found_map (dict): The dictionary mapping a subsplit (as a bito bitset object)
+            to the truth value of the subsplit being already found.
     """
     rows_for_df = []
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -137,19 +149,22 @@ def sdag_results_df_of(
                     cred_tree_count = get_credible_tree_count(
                         tree_cred_map, tree_found_map
                     )
-
                     update_found_edges(dag, pcsp_found_map)
-                    posterior_edge_count = sum(pcsp_found_map.values())
-                    credible_edge_count = sum(
-                        (
-                            pcsp_cred_map[pcsp]
-                            for pcsp, found in pcsp_found_map.items()
-                            if found
-                        )
+                    posterior_edge_count = get_posterior_edge_count(pcsp_found_map)
+                    credible_edge_count = get_credible_edge_count(
+                        pcsp_cred_map, pcsp_found_map
+                    )
+                    update_found_nodes(dag, subsplit_found_map)
+                    posterior_subsplit_count = get_posterior_subsplit_count(
+                        subsplit_found_map
+                    )
+                    credible_subsplit_count = get_credible_subsplit_count(
+                        subsplit_cred_map, subsplit_found_map
                     )
 
                 row = [topology, node_count, edge_count, tree_count, cred_tree_count]
                 row.extend([tree_pp, posterior_edge_count, credible_edge_count])
+                row.extend([posterior_subsplit_count, credible_subsplit_count])
                 rows_for_df.append(row)
                 if topology < max_topology_count:
                     next_tree = seen_trees[topology]
@@ -166,6 +181,8 @@ def sdag_results_df_of(
             "sdag_total_pp",
             "sdag_edges_in_posterior",
             "sdag_edges_in_credible",
+            "sdag_nodes_in_posterior",
+            "sdag_nodes_in_credible",
         ],
     )
     credible_count = sum(tree_cred_map.values())
@@ -212,6 +229,7 @@ def restrict_to_dag(newick_path, tree_dicts):
 @click.argument("posterior_newick_path", type=str)
 @click.argument("pp_csv", type=str)
 @click.argument("pcsp_pp_csv", type=str)
+@click.argument("subsplit_csv", type=str)
 @click.argument("out_path", type=str)
 @click.option("--skip_sdag_stats", is_flag=True)
 def run(
@@ -222,6 +240,7 @@ def run(
     posterior_newick_path,
     pp_csv,
     pcsp_pp_csv,
+    subsplit_csv,
     out_path,
     skip_sdag_stats=False,
 ):
@@ -242,6 +261,9 @@ def run(
             trees in posterior_newick_path.
         pcsp_pp_csv (str): Path to the csv file with the posterior probababilities of
             the edges of the sDAG spanned by the topologies in posterior_newick_path.
+        subsplit_csv (str): Path to the csv file with subsplits and their membership
+            in the credible set, for the subsplits of the sDAG spanned by the
+            topoloiogies in posterior_newick_path.
         out_path (str): Write out path for the data.
     """
     # Gather the topologies visited by Mr Bayes.
@@ -274,6 +296,7 @@ def run(
             all_seen_path, (tree_id_map, tree_pp_map, tree_cred_map, tree_found_map)
         )
         _, pcsp_cred_map, pcsp_found_map = load_pcsp_pp_map(pcsp_pp_csv)
+        subsplit_cred_map, subsplit_found_map = load_subsplit_map(subsplit_csv)
 
         # Construct sdags from MCMC trees and get stats.
         seen_tree_inst, seen_trees = load_trees(fasta_path, all_seen_path, temp_dir)
@@ -287,6 +310,8 @@ def run(
             tree_found_map,
             pcsp_cred_map,
             pcsp_found_map,
+            subsplit_cred_map,
+            subsplit_found_map,
         )
 
     final_df = accumulation_df.merge(sdag_results_df, on="support_size")

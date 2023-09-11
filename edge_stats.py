@@ -2,6 +2,10 @@ import pandas as pd
 
 
 def write_edge_counts_to_file(out_path):
+    """
+    Get the number of edges from credible and posterior trees based on the csv files for
+    PCSPs (prepared by running nni-search with build-pcsp-map) and write to out_path.
+    """
     the_data = [
         (ds, prior, *get_posterior_edge_counts(ds, prior))
         for ds in [1, 3, 4, 5, 6, 7, 8]
