@@ -245,6 +245,62 @@ def build_and_save_pcsp_pp_map_with_fake_first(
     return pcsp_pp_map, pcsp_cred_map
 
 
+def build_and_save_subsplit_map_with_fake_first(
+    fasta_path,
+    posterior_newick_path,
+    posterior_probs_path,
+    fake_first_path,
+    output_path,
+):
+    """
+    Calculate and write to output_path the credibility of subsplits, based on those in
+    posterior_probs_path, for the subsplits in the sDAG spanned by the topologies in
+    posterior_newick_path.
+
+    This version creates the sDAG with the additional topology in fake_first_path, so
+    there may be more subsplits than expected. However, the reported membership in the
+    credible set of the expected subsplits are correct. Additionally, this issue does
+    not exist when the topology of fake_first_path is contained in the sDAG (this is
+    always the case under the current design).
+
+    Parameters:
+        fasta_path (str): The path for the fasta file.
+        posterior_newick_path (str): The path for the newick file of posterior trees.
+        posterior_probs_path (str): The of the csv file of probabilies for the trees of
+            posterior_newick_path.
+        fake_first_path (str): The path for the first newick entry.
+        output_path (str): The path to write out the csv of pcsp posterior
+            probabilities.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        print_v("# load dag...")
+        dag_inst, dag = load_dag_with_fake_first(
+            fasta_path, posterior_newick_path, fake_first_path, temp_dir
+        )
+        print_v("# load trees...")
+        tree_inst, trees = load_trees_with_fake_first(
+            fasta_path, posterior_newick_path, fake_first_path, temp_dir
+        )
+        print_v("# load pps...")
+        pps = load_pps(posterior_probs_path)
+
+        print_v("# build maps...")
+        tree_id_map, _, tree_cred_map, _ = build_tree_dicts(trees, pps)
+        subsplit_cred_map = build_subsplit_dict(dag, tree_id_map, tree_cred_map)
+
+        with open(output_path, "w") as the_file:
+            header = "subsplit,in_cred_set\n"
+            the_file.write(header)
+            subsplit_lines = (
+                f"{subsplit.subsplit_to_string()},{is_credible}\n"
+                for subsplit, is_credible in subsplit_cred_map.items()
+            )
+            the_file.writelines(subsplit_lines)
+
+    return subsplit_cred_map
+
+
+
 def load_pps(pp_path):
     """
     Returns the list of posterior probabilities in pp_path.
@@ -256,14 +312,24 @@ def load_pps(pp_path):
 
 def load_pcsp_pp_map(pcsp_pp_path):
     """
-    Reads the PCSP data in pcsp_pp_path and returns two default dictionaries. The first
-    is a dictionary mapping a PCSP (as a bito bitset object) to its posterior
+    Reads the PCSP data in pcsp_pp_path and returns three default dictionaries. The
+    first is a dictionary mapping a PCSP (as a bito bitset object) to its posterior
     probability, with default 0.0. The second is a dictionary mapping a PCSP to the
-    truth value for the PCSP appearing in a credible set topology.
+    truth value for the PCSP appearing in a credible set topology. The third is a
+    default dictionary, with default False, mapping a PCSP to the truth value of the
+    PCSP being found by a search method.
+
+    The purpose of the final dictionary is to take advantage of the fact that the search
+    methods enlarge the sDAG of the previous iteration. Once an edge is found in the
+    sDAG of an iteration of the search, the edge is present in the sDAGs of all future
+    iterations.
 
     The csv file pcsp_pp_path is expected to have columns "parent", "child", "pcsp_pp",
     and "in_cred_set", as prepared by the methods build_and_save_pcsp_pp_map and
-    build_and_save_pcsp_pp_map_with_fake_first.
+    build_and_save_pcsp_pp_map_with_fake_first. Note that since this is loading the data
+    from file, the credible set (95% by default) cannot be changed. I.e., if you want
+    edges with a different cutoff for the cumulative density of the credible set
+    topologies, then you need to rerun build build-pcsp-map.
     """
     to_subsplit = lambda clades: bito.subsplit(*clades)
     to_pcsp = lambda subsplits: bito.pcsp(*subsplits)
@@ -278,7 +344,43 @@ def load_pcsp_pp_map(pcsp_pp_path):
 
     pcsp_pp_map = defaultdict(float, df["pcsp_pp"].to_dict())
     pcsp_cred_map = defaultdict(bool, df["in_cred_set"].to_dict())
-    return pcsp_pp_map, pcsp_cred_map
+    pcsp_found_map = defaultdict(bool, {pcsp: False for pcsp in pcsp_pp_map})
+    return pcsp_pp_map, pcsp_cred_map, pcsp_found_map
+
+
+def load_subsplit_map(subsplit_path):
+    """
+    Reads the subsplit data in subsplit_path and returns two default dictionaries. The
+    first is a dictionary mapping a subsplit (as a bito bitset object) to the truth 
+    value for the subsplit appearing in a credible set topology. The second is a
+    default dictionary, with default False, mapping a subsplit to the truth value of the
+    subsplit being found by a search method.
+
+    The purpose of the final dictionary is to take advantage of the fact that the search
+    methods enlarge the sDAG of the previous iteration. Once a subsplit is found in the
+    sDAG of an iteration of the search, the subsplit is present in the sDAGs of all future
+    iterations.
+
+    The csv file should be prepared by the build_and_save_subsplit_map_with_fake_first
+    method. Note that since this is loading the data from file, the credible set (95% by 
+    default) cannot be changed. I.e., if you want subsplits with a different cutoff for 
+    the cumulative density of the credible set topologies, then you need to rerun 
+    build-subsplit-map.
+    """
+    to_subsplit = lambda x: bito.subsplit(*x.split("|"))
+    with open(subsplit_path) as the_file:
+        # Skip the header.
+        the_file.readline()
+        subsplit_cred_map = {
+            to_subsplit((split := line.split(","))[0]): split[1][0] == "T"
+            for line in the_file.readlines()
+        }
+
+    subsplit_cred_map = defaultdict(bool, subsplit_cred_map)
+    subsplit_found_map = defaultdict(
+        bool, {subsplit: False for subsplit in subsplit_cred_map}
+    )
+    return subsplit_cred_map, subsplit_found_map
 
 
 def build_tree_dicts(trees, pps, cred_pp=0.95):
@@ -345,6 +447,35 @@ def build_pcsp_dicts(dag, tree_id_map, tree_pp_map, tree_cred_map):
     return pcsp_pp_map, pcsp_cred_map
 
 
+def build_subsplit_dict(dag, tree_id_map, tree_cred_map):
+    """
+    Given a bito dag and tree dictionaries, this method constructs and returns the
+    dictionary mapping the subsplits (as bito bitsets) of the dag to truth values for
+    membership of the credible set.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        tree_id_map (dict): The dictionary mapping tree_id to bito RootedTree.
+        tree_cred_map (dict): The dictionary mapping tree_id to truth value of
+            membership of the credible set.
+    """
+
+    sdag_nodes = dag.build_set_of_node_bitsets()
+    subsplit_cred_map = defaultdict(bool, {node: False for node in sdag_nodes})
+
+    n_taxa = dag.taxon_count()
+    root = bito.subsplit("0" * n_taxa, "1" * n_taxa)
+    subsplit_cred_map[root] = True
+
+    for tree_id, is_credible in tree_cred_map.items():
+        if is_credible:
+            tree = tree_id_map[tree_id]
+            tree_nodes = tree.build_set_of_subsplits()
+            for node in tree_nodes:
+                subsplit_cred_map[node] = True
+    return subsplit_cred_map
+
+
 def get_pcsp_pp(nni, pcsp_pp_map):
     """Returns the posterior probability of the PCSP associated to the NNI."""
     pcsp = nni.get_central_edge_pcsp() if type(nni) == bito.nni_op else nni
@@ -361,13 +492,34 @@ def get_pcsp_pp_rank(best_nni, scored_nnis, pcsp_pp_map):
     return pcsp_pp_rank
 
 
-def get_credible_edge_count(dag, pcsp_cred_map):
+def get_credible_edge_count(pcsp_cred_map, pcsp_found_map):
     """
-    Returns the number of edges in the dag that are in topologies of the credible set.
+    Returns the number of sdag edges that are in topologies of the credible set and marked as found.
     """
-    pcsps = dag.build_set_of_edge_bitsets()
-    cred_edge_count = sum((pcsp_cred_map[pcsp] for pcsp in pcsps))
-    return cred_edge_count
+    return sum((pcsp_cred_map[pcsp] for pcsp, found in pcsp_found_map.items() if found))
+
+
+def get_posterior_edge_count(pcsp_found_map):
+    """
+    Returns the number of sdag edges that are in topologies of the posterior and marked as found.
+    """
+    return sum(pcsp_found_map.values())
+
+
+def get_credible_subsplit_count(subsplit_cred_map, subsplit_found_map):
+    """
+    Returns the number of sdag nodes or subsplits that are in topologies of the credible set and marked as found.
+    """
+    return sum(
+        (subsplit_cred_map[node] for node, found in subsplit_found_map.items() if found)
+    )
+
+
+def get_posterior_subsplit_count(subsplit_found_map):
+    """
+    Returns the number of sdag nodes or subsplits that are in topologies of the posterior and marked as found.
+    """
+    return sum(subsplit_found_map.values())
 
 
 def get_tree_pp(tree_pp_map, tree_found_map):
@@ -415,6 +567,46 @@ def update_found_trees(dag, tree_id_map, tree_found_map):
     for tree_id in newly_found_tree_ids:
         tree_found_map[tree_id] = True
     return newly_found_tree_ids
+
+
+def update_found_edges(dag, pcsp_found_map):
+    """
+    Updates the pcsp_found_map dictionary to mark as found the edges contained in the
+    dag.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        pcsp_found_map (dict): The dictionary mapping a PCSP to truth value of the PCSP
+            being already found.
+    """
+    pcsps = dag.build_set_of_edge_bitsets()
+    newly_found_pcsps = (
+        pcsp for pcsp, found in pcsp_found_map.items() if not found and pcsp in pcsps
+    )
+    for pcsp in newly_found_pcsps:
+        pcsp_found_map[pcsp] = True
+    return None
+
+
+def update_found_nodes(dag, subsplit_found_map):
+    """
+    Updates the subsplit_found_map dictionary to mark as found the subsplits contained
+    in the dag.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        subsplit_found_map (dict): The dictionary mapping a subsplit to truth value of
+            the subsplit being already found.
+    """
+    nodes = dag.build_set_of_node_bitsets()
+    newly_found_nodes = (
+        node
+        for node, found in subsplit_found_map.items()
+        if not found and node in nodes
+    )
+    for node in newly_found_nodes:
+        subsplit_found_map[node] = True
+    return None
 
 
 def build_ranked_list(list):
@@ -469,6 +661,9 @@ def init_results_file(
     tree_cred_map,
     tree_found_map,
     pcsp_cred_map,
+    pcsp_found_map,
+    subsplit_cred_map,
+    subsplit_found_map,
 ):
     """
     Create a csv file at file_path and writes to this file the header line and sdag
@@ -481,14 +676,24 @@ def init_results_file(
     posterior_tree_ids = f'"{posterior_tree_ids}"'
     tree_pp = get_tree_pp(tree_pp_map, tree_found_map)
     cred_tree_count = get_credible_tree_count(tree_cred_map, tree_found_map)
-    cred_edge_count = get_credible_edge_count(dag, pcsp_cred_map)
+
+    update_found_edges(dag, pcsp_found_map)
+    cred_edge_count = get_credible_edge_count(pcsp_cred_map, pcsp_found_map)
+    posterior_edge_count = get_posterior_edge_count(pcsp_found_map)
+
+    update_found_nodes(dag, subsplit_found_map)
+    cred_node_count = get_credible_subsplit_count(subsplit_cred_map, subsplit_found_map)
+    posterior_node_count = get_posterior_subsplit_count(subsplit_found_map)
 
     header = "iter,acc_nni_id,acc_nni_count,score,tree_pp,pcsp_pp,pcsp_pp_rank,"
-    header += "node_count,edge_count,cred_edge_count,tree_count,cred_tree_count,"
+    header += "node_count,cred_node_count,posterior_node_count,edge_count,"
+    header += "cred_edge_count,posterior_edge_count,tree_count,cred_tree_count,"
     header += "posterior_tree_ids,adj_nni_count,new_nni_count,llhs_computed,parent,"
     header += "child\n"
-    first_row = f"0,,0,,{tree_pp},,,{node_count},{edge_count},{cred_edge_count},"
-    first_row += f"{tree_count},{cred_tree_count},{posterior_tree_ids},0,0,0,,\n"
+    first_row = f"0,,0,,{tree_pp},,,{node_count},{cred_node_count},"
+    first_row += f"{posterior_node_count},{edge_count},{cred_edge_count},"
+    first_row += f"{posterior_edge_count},{tree_count},{cred_tree_count},"
+    first_row += f"{posterior_tree_ids},0,0,0,,\n"
     with open(file_path, "w") as the_file:
         the_file.write(header)
         the_file.write(first_row)
@@ -525,7 +730,8 @@ def nni_search(args):
         tree_id_map, tree_pp_map, tree_cred_map, tree_found_map = build_tree_dicts(
             trees, pps
         )
-        pcsp_pp_map, pcsp_cred_map = load_pcsp_pp_map(args.pcsp_pp_csv)
+        pcsp_pp_map, pcsp_cred_map, pcsp_found_map = load_pcsp_pp_map(args.pcsp_pp_csv)
+        subsplit_cred_map, subsplit_found_map = load_subsplit_map(args.subsplit_csv)
 
         print_v("# load dag...")
         dag_inst, dag = load_dag(args.fasta, args.seed_newick, temp_dir)
@@ -546,6 +752,9 @@ def nni_search(args):
             tree_cred_map,
             tree_found_map,
             pcsp_cred_map,
+            pcsp_found_map,
+            subsplit_cred_map,
+            subsplit_found_map,
         )
 
         log_iteration_frequency = args.log_freq
@@ -613,7 +822,19 @@ def nni_search(args):
                     cred_tree_count = get_credible_tree_count(
                         tree_cred_map, tree_found_map
                     )
-                    cred_edge_count = get_credible_edge_count(dag, pcsp_cred_map)
+                    update_found_edges(dag, pcsp_found_map)
+                    cred_edge_count = get_credible_edge_count(
+                        pcsp_cred_map, pcsp_found_map
+                    )
+                    posterior_edge_count = get_posterior_edge_count(pcsp_found_map)
+                    update_found_nodes(dag, subsplit_found_map)
+                    cred_node_count = get_credible_subsplit_count(
+                        subsplit_cred_map, subsplit_found_map
+                    )
+                    posterior_node_count = get_posterior_subsplit_count(
+                        subsplit_found_map
+                    )
+
                     adjacent_nni_count = nni_engine.adjacent_nni_count()
                     print_v("# dag_tree_pp:", tree_pp)
 
@@ -633,8 +854,11 @@ def nni_search(args):
                             pcsp_pp,
                             pcsp_pp_rank,
                             node_count,
+                            cred_node_count,
+                            posterior_node_count,
                             edge_count,
                             cred_edge_count,
+                            posterior_edge_count,
                             tree_count,
                             cred_tree_count,
                             posterior_tree_ids,
@@ -766,6 +990,11 @@ def main_arg_parse(args):
         help="csv file containing the per-PCSP posterior weights",
         type=str,
     )
+    subparser1.add_argument(
+        "subsplit_csv",
+        help="csv file containing the posterior and credible subsplits",
+        type=str,
+    )
     # search method group
     group = subparser1.add_mutually_exclusive_group(required=True)
     group.add_argument(
@@ -857,6 +1086,33 @@ def main_arg_parse(args):
         type=str,
         default="results.pcsp_pp_map.csv",
     )
+
+    # subsplit map builder
+    subparser3 = subparsers.add_parser("build-subsplit-map", help="Build subsplit map.")
+    subparser3.add_argument("fasta", help="fasta file", type=str)
+    subparser3.add_argument(
+        "posterior_newick",
+        help="newick file for trees in empirical posterior",
+        type=str,
+    )
+    subparser3.add_argument(
+        "pp_csv",
+        help="csv file containing the posterior weights of the trees from posterior_newick",
+        type=str,
+    )
+    subparser3.add_argument(
+        "seed_newick",
+        help="newick file for initial trees in DAG, needed now to avoid a taxon label problem",
+        type=str,
+    )
+    # options
+    subparser3.add_argument(
+        "-o",
+        "--output",
+        help="output file",
+        type=str,
+        default="results.subsplit_node_map.csv",
+    )
     # run parser
     parsed_args = parser.parse_args(args)
     args_dict = vars(parsed_args)
@@ -876,6 +1132,14 @@ if __name__ == "__main__":
             nni_search(args)
     if args.program == "build-pcsp-map":
         build_and_save_pcsp_pp_map_with_fake_first(
+            args.fasta,
+            args.posterior_newick,
+            args.pp_csv,
+            args.seed_newick,
+            args.output,
+        )
+    if args.program == "build-subsplit-map":
+        build_and_save_subsplit_map_with_fake_first(
             args.fasta,
             args.posterior_newick,
             args.pp_csv,

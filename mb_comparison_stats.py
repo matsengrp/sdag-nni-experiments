@@ -8,12 +8,20 @@ import pathlib
 from collections import namedtuple
 import click
 from nni_search import (
-    load_trees_with_fake_first,
-    load_trees,
-    get_tree_pp,
     build_tree_dicts,
+    get_credible_edge_count,
+    get_credible_subsplit_count,
     get_credible_tree_count,
+    get_posterior_edge_count,
+    get_posterior_subsplit_count,
+    get_tree_pp,
+    load_pcsp_pp_map,
+    load_subsplit_map,
     load_pps,
+    load_trees,
+    load_trees_with_fake_first,
+    update_found_edges,
+    update_found_nodes,
     update_found_trees,
 )
 
@@ -52,11 +60,6 @@ def mcmc_df_of_topology_sequence(topology_seq_path, seen_topology_dir, golden):
     # different first lines.
     first_time = []
 
-    write_path = seen_topology_dir + "/topologies-seen.{}.nwk"
-
-    def seen_to_file():
-        topology_set_to_path(seen_list, write_path.format(len(seen_list)))
-
     for topology in df["topology"]:
         if topology in seen:
             first_time.append(False)
@@ -64,7 +67,9 @@ def mcmc_df_of_topology_sequence(topology_seq_path, seen_topology_dir, golden):
             first_time.append(True)
             seen.add(topology)
             seen_list.append(topology)
-            seen_to_file()
+
+    write_path = seen_topology_dir + f"/topologies-seen.{len(seen_list)}.nwk"
+    topology_set_to_path(seen_list, write_path)
     df["first_time"] = first_time
     df["support_size"] = df["first_time"].cumsum()
     df["mcmc_iters"] = df.dwell_count.cumsum().shift(1, fill_value=0)
@@ -84,11 +89,15 @@ def mcmc_df_of_topology_sequence(topology_seq_path, seen_topology_dir, golden):
 def sdag_results_df_of(
     seen_trees,
     max_topology_count,
-    seen_topology_dir,
+    all_seen_path,
     tree_id_map,
     tree_pp_map,
     tree_cred_map,
     tree_found_map,
+    pcsp_cred_map,
+    pcsp_found_map,
+    subsplit_cred_map,
+    subsplit_found_map,
 ):
     """
     Calculate sdag stats for topologies from Mr. Bayes.
@@ -98,41 +107,68 @@ def sdag_results_df_of(
             Bayes, in the order of seen topologies.
         max_topology_count (int): The maximum number of topologies for which to compute
             sDAG statistics.
-        seen_topology_dir (str): The path of the directory with newick files for the
-            seen topologies.
+        all_seen_path (str): The path of the newick files for all seen topologies,
+            sorted by sorder order.
         tree_id_map (dict): The dictionary mapping tree_id to bito RootedTree.
         tree_pp_map (dict): The dictionary mapping tree_id to posterior probability.
         tree_cred_map (dict): The dictionary mapping tree_id to truth value of
             membership of the credible set.
         tree_found_map (dict): The dictionary mapping tree_id to truth value of the
             tree being already found.
+        pcsp_cred_map (dict): The dictionary mapping a PCSP (as a bito bitset object) to
+            the truth value of the PCSP appearing in a topology of the credible set.
+        pcsp_found_map (dict): The dictionary mapping a PCSP (as a bito bitset object)
+            to the truth value of the PCSP being already found.
+        subsplit_cred_map (dict): The dictionary mapping a subsplit (as a bito bitset object) to
+            the truth value of the subsplit appearing in a topology of the credible set.
+        subsplit_found_map (dict): The dictionary mapping a subsplit (as a bito bitset object)
+            to the truth value of the subsplit being already found.
     """
     rows_for_df = []
-    topologies_path = lambda x: f"{seen_topology_dir}/topologies-seen.{x}.nwk"
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_data_path = os.path.join(tmpdir, "mmap.dat")
         tree_increases_dag = True
-        for topology in range(1, max_topology_count + 1):
-            print(f"Tree {topology} is necessary: {tree_increases_dag}")
-            if tree_increases_dag:
-                topologies_seen_path = topologies_path(topology)
-                inst = bito.gp_instance(temp_data_path)
-                inst.read_newick_file(topologies_seen_path)
-                inst.make_dag()
-                dag = inst.get_dag()
-                update_found_trees(dag, tree_id_map, tree_found_map)
+        seen_path = os.path.join(tmpdir, "current_seen.nwk")
+        with open(all_seen_path) as all_seen, open(seen_path, "a") as seen_file:
+            for topology in range(1, max_topology_count + 1):
+                current_line = next(all_seen)
+                print(f"Tree {topology} is necessary: {tree_increases_dag}")
+                if tree_increases_dag:
+                    seen_file.write(current_line + "\n")
+                    seen_file.flush()
+                    inst = bito.gp_instance(temp_data_path)
+                    inst.read_newick_file(seen_path)
+                    inst.make_dag()
+                    dag = inst.get_dag()
 
-                tree_count = int(dag.topology_count())
-                node_count = dag.node_count()
-                edge_count = dag.edge_count()
-                tree_pp = get_tree_pp(tree_pp_map, tree_found_map)
-                cred_tree_count = get_credible_tree_count(tree_cred_map, tree_found_map)
-            rows_for_df.append(
-                [topology, node_count, edge_count, tree_count, cred_tree_count, tree_pp]
-            )
-            if topology < max_topology_count:
-                next_tree = seen_trees[topology]
-                tree_increases_dag = not dag.contains_tree(next_tree)
+                    update_found_trees(dag, tree_id_map, tree_found_map)
+                    tree_count = int(dag.topology_count())
+                    node_count = dag.node_count()
+                    edge_count = dag.edge_count()
+                    tree_pp = get_tree_pp(tree_pp_map, tree_found_map)
+                    cred_tree_count = get_credible_tree_count(
+                        tree_cred_map, tree_found_map
+                    )
+                    update_found_edges(dag, pcsp_found_map)
+                    posterior_edge_count = get_posterior_edge_count(pcsp_found_map)
+                    credible_edge_count = get_credible_edge_count(
+                        pcsp_cred_map, pcsp_found_map
+                    )
+                    update_found_nodes(dag, subsplit_found_map)
+                    posterior_subsplit_count = get_posterior_subsplit_count(
+                        subsplit_found_map
+                    )
+                    credible_subsplit_count = get_credible_subsplit_count(
+                        subsplit_cred_map, subsplit_found_map
+                    )
+
+                row = [topology, node_count, edge_count, tree_count, cred_tree_count]
+                row.extend([tree_pp, posterior_edge_count, credible_edge_count])
+                row.extend([posterior_subsplit_count, credible_subsplit_count])
+                rows_for_df.append(row)
+                if topology < max_topology_count:
+                    next_tree = seen_trees[topology]
+                    tree_increases_dag = not dag.contains_tree(next_tree)
 
     the_df = pd.DataFrame(
         rows_for_df,
@@ -143,6 +179,10 @@ def sdag_results_df_of(
             "sdag_topos_total",
             "sdag_topos_in_credible",
             "sdag_total_pp",
+            "sdag_edges_in_posterior",
+            "sdag_edges_in_credible",
+            "sdag_nodes_in_posterior",
+            "sdag_nodes_in_credible",
         ],
     )
     credible_count = sum(tree_cred_map.values())
@@ -188,6 +228,8 @@ def restrict_to_dag(newick_path, tree_dicts):
 @click.argument("seed_newick_path", type=str)
 @click.argument("posterior_newick_path", type=str)
 @click.argument("pp_csv", type=str)
+@click.argument("pcsp_pp_csv", type=str)
+@click.argument("subsplit_csv", type=str)
 @click.argument("out_path", type=str)
 @click.option("--skip_sdag_stats", is_flag=True)
 def run(
@@ -197,6 +239,8 @@ def run(
     seed_newick_path,
     posterior_newick_path,
     pp_csv,
+    pcsp_pp_csv,
+    subsplit_csv,
     out_path,
     skip_sdag_stats=False,
 ):
@@ -213,12 +257,18 @@ def run(
             for multiple bito object instances.
         posterior_newick_path (str): Path to the newick file of the posterior trees from
             the long run of Mr. Bayes.
-        pp_csv (str): Path to the csv file with the posterior probababilities of the trees
-            in posterior_newick_path.
+        pp_csv (str): Path to the csv file with the posterior probababilities of the
+            trees in posterior_newick_path.
+        pcsp_pp_csv (str): Path to the csv file with the posterior probababilities of
+            the edges of the sDAG spanned by the topologies in posterior_newick_path.
+        subsplit_csv (str): Path to the csv file with subsplits and their membership
+            in the credible set, for the subsplits of the sDAG spanned by the
+            topoloiogies in posterior_newick_path.
         out_path (str): Write out path for the data.
     """
     # Gather the topologies visited by Mr Bayes.
     golden = golden_data_of_path(golden_pickle_path)
+
     seen_topology_dir = os.path.dirname(topology_sequence_path) + "/topologies-seen"
     accumulation_df = mcmc_df_of_topology_sequence(
         topology_sequence_path, seen_topology_dir, golden
@@ -240,21 +290,28 @@ def run(
         tree_id_map, tree_pp_map, tree_cred_map, tree_found_map = build_tree_dicts(
             trees, pps
         )
+
         all_seen_path = f"{seen_topology_dir}/topologies-seen.{total_seen_count}.nwk"
         restrict_to_dag(
             all_seen_path, (tree_id_map, tree_pp_map, tree_cred_map, tree_found_map)
         )
+        _, pcsp_cred_map, pcsp_found_map = load_pcsp_pp_map(pcsp_pp_csv)
+        subsplit_cred_map, subsplit_found_map = load_subsplit_map(subsplit_csv)
 
         # Construct sdags from MCMC trees and get stats.
         seen_tree_inst, seen_trees = load_trees(fasta_path, all_seen_path, temp_dir)
         sdag_results_df = sdag_results_df_of(
             seen_trees,
             total_seen_count,
-            seen_topology_dir,
+            all_seen_path,
             tree_id_map,
             tree_pp_map,
             tree_cred_map,
             tree_found_map,
+            pcsp_cred_map,
+            pcsp_found_map,
+            subsplit_cred_map,
+            subsplit_found_map,
         )
 
     final_df = accumulation_df.merge(sdag_results_df, on="support_size")

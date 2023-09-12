@@ -1,5 +1,5 @@
 #!/bin/bash
-# set -x
+
 
 declare -A ds_roots=( [1]=15 [3]=7 [4]=8 [5]=1 [6]=6 [7]=7 [8]=4 )
 declare -a prior_types=( "_output" "_exp_output" )
@@ -30,7 +30,7 @@ function prep_ds_data() {
     mb_trees="${dest_path}/ds${ds}.mb-trees.nwk"
     mb_pp="${dest_path}/ds${ds}.mb-pp.csv"
     pcsp_pp="${dest_path}/ds${ds}.pcsp-pp.csv"
-
+    subsplit_path="${dest_path}/ds${ds}.subsplit.csv"
 
     mkdir -p $dest_path
 
@@ -54,6 +54,9 @@ function prep_ds_data() {
     echo "# Calculating pcsp posterior weights via nni_search.py build-pcsp-map..."
     python nni_search.py build-pcsp-map $fasta $mb_trees $mb_pp $first_nwk -o $pcsp_pp
 
+    echo "# Calculating credible and posterior subsplits via nni_search.py build-subsplit-map..."
+    python nni_search.py build-subsplit-map $fasta $mb_trees $mb_pp $first_nwk -o $subsplit_path
+
     echo "# Copying fasta file to local directory..."
     fasta="${golden_path}/ds"$ds"/${prior_type}/ds"$ds".fasta"
     cp $fasta data/ds${ds}/ds${ds}.fasta
@@ -70,3 +73,4 @@ for ds in "${!ds_roots[@]}"; do
     prep_ds_data $ds $root $prior_type
   done
 done
+
