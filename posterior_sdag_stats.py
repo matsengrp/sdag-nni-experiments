@@ -57,6 +57,29 @@ def get_posterior_edge_counts(ds, prior="uniform"):
     return edge_count, posterior_edge_count, credible_edge_count
 
 
+def write_flu_data_counts_to_file(out_path):
+    pcsp_pp_path = f"data/flu100/_output/flu100.pcsp-pp.csv"
+    edge_df = pd.read_csv(pcsp_pp_path)
+    posterior_edge_count = sum(edge_df.pcsp_pp > 0)
+    credible_edge_count = sum(edge_df.in_cred_set)
+
+    subsplit_path = f"data/flu100/_output/flu100.subsplit.csv"
+    subsplit_df = pd.read_csv(subsplit_path)
+    posterior_subsplit_count = len(subsplit_df)
+    credible_subsplit_count = sum(subsplit_df.in_cred_set)
+
+    to_write = (
+        "ds,prior,posterior_edge_count,credible_edge_count,posterior_subsplit_count,"
+        + f"credible_subsplit_count\nflu100,uniform,{posterior_edge_count},"
+        + f"{credible_edge_count},{posterior_subsplit_count},"
+        + f"{credible_subsplit_count}\n"
+    )
+    with open(out_path, "w") as the_file:
+        the_file.write(to_write)
+    return None
+
+
 if __name__ == "__main__":
     write_edge_counts_to_file("data/posterior_edge_counts.csv")
     write_subsplit_counts_to_file("data/posterior_subsplit_counts.csv")
+    write_flu_data_counts_to_file("data/posterior_flu100_counts.csv")

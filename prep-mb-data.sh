@@ -31,7 +31,8 @@ function prep_mb_data() {
     mkdir -p $mb_run_dir
 
     # Create the Mr. Bayes file.
-    python make_mb_file.py $ds $first_tree_path $prior_str $mb_run_path
+    python make_mb_file.py $ds $first_tree_path $prior_str $mb_run_path \
+      --generations 1000000 
 
     echo "### Running Mr. Bayes..."
     cd $mb_run_dir
@@ -49,35 +50,6 @@ function prep_mb_data() {
       $subsplit_path $out_path
 
     echo "### Results written to mb_run_dir="${data_path}/short_mcmc""
-
-
-    # Next do a longer run, but skip the spanned sDAG stats.
-    mb_timed_run_dir="${data_path}/short_mcmc/timing"
-    mb_timed_run_path="${mb_timed_run_dir}/run.mb"
-    rerooted_topologies_path="${mb_timed_run_dir}/rerooted-topology-sequence.tab"
-    out_path="${mb_timed_run_dir}/mcmc_search_stats.csv"    
-
-    # Create the Mr. Bayes file.
-    mkdir -p $mb_timed_run_dir
-    python make_mb_file.py $ds $first_tree_path $prior_str $mb_timed_run_path \
-      --generations 1000000 
-
-    echo "### Running Mr. Bayes..."
-    cd $mb_timed_run_dir
-    mb run.mb | tee mb.log
-
-    echo "### Processing Mr. Bayes trees file..."
-    awk '$1~/tree/ {print $NF}' ds${ds}.t | nw_topology - | nw_reroot - ${root} \
-      | nw_order - | uniq -c | sed -e "s/^[ ]*//" -e "s/[ ]/\t/" \
-      > rerooted-topology-sequence.tab
-    cd ../../../../..
-
-    echo "### Calculating statistics..."
-    python mb_comparison_stats.py $posterior_pickle_path $rerooted_topologies_path \
-      $fasta_path $first_tree_path $posterior_newick_path $pp_csv $pcsp_pp_csv \
-      $subsplit_path $out_path --skip_sdag_stats
-
-    echo "### Results written to ${mb_timed_run_dir}"
 }
 
 for ds in "${!ds_roots[@]}"; do

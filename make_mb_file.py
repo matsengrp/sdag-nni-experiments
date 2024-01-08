@@ -12,7 +12,7 @@ def prepare_mb_run_file(
     ds, initial_tree_path, branch_length_prior, out_path, generations=100000
 ):
     """
-    Use the mb template file and the specified settings to create a Mr Baye file that is
+    Use the mb template file and the specified settings to create a MrBayes file that is
     ready to run.
 
     Parameters:
@@ -20,7 +20,7 @@ def prepare_mb_run_file(
         initial_tree_path (string): The file path for the newick string, with branch
             lengths, of the starting tree.
         branch_length_prior (string): The prior on the branch lengths, in the format of
-            Mr. Bayes.
+            MrBayes.
     """
     template_path = "data/mb_template.mb"
     with open(template_path) as mb_template_file:

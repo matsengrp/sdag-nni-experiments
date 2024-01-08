@@ -9,7 +9,7 @@ function nni_search() {
     ds=$1
     result_type=$2
     search=$3
-    max_iter=500
+    max_iter=50
     echo "### nni_search ds=${ds} result_type=${result_type} search=${search}..."
 
     data_path="data/ds${ds}"

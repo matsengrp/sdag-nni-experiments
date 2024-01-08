@@ -5,6 +5,7 @@ import pandas as pd
 import tempfile
 import os
 import pathlib
+import time
 from collections import namedtuple
 import click
 from nni_search import (
@@ -19,7 +20,6 @@ from nni_search import (
     load_subsplit_map,
     load_pps,
     load_trees,
-    load_trees_with_fake_first,
     update_found_edges,
     update_found_nodes,
     update_found_trees,
@@ -136,10 +136,12 @@ def sdag_results_df_of(
                 if tree_increases_dag:
                     seen_file.write(current_line + "\n")
                     seen_file.flush()
+                    start_time = time.time()
                     inst = bito.gp_instance(temp_data_path)
                     inst.read_newick_file(seen_path)
                     inst.make_dag()
                     dag = inst.get_dag()
+                    dag_construction_time = time.time() - start_time
 
                     update_found_trees(dag, tree_id_map, tree_found_map)
                     tree_count = int(dag.topology_count())
@@ -165,6 +167,7 @@ def sdag_results_df_of(
                 row = [topology, node_count, edge_count, tree_count, cred_tree_count]
                 row.extend([tree_pp, posterior_edge_count, credible_edge_count])
                 row.extend([posterior_subsplit_count, credible_subsplit_count])
+                row.append(dag_construction_time)
                 rows_for_df.append(row)
                 if topology < max_topology_count:
                     next_tree = seen_trees[topology]
@@ -183,6 +186,7 @@ def sdag_results_df_of(
             "sdag_edges_in_credible",
             "sdag_nodes_in_posterior",
             "sdag_nodes_in_credible",
+            "sdag_build_time",
         ],
     )
     credible_count = sum(tree_cred_map.values())
@@ -283,9 +287,7 @@ def run(
     # Get all posterior trees, then restrict to those in the largest sdag of MCMC trees.
     # The rest are never visited and don't contribute to any of the stats.
     with tempfile.TemporaryDirectory() as temp_dir:
-        tree_inst, trees = load_trees_with_fake_first(
-            fasta_path, posterior_newick_path, seed_newick_path, temp_dir
-        )
+        tree_inst, trees = load_trees(fasta_path, posterior_newick_path, temp_dir)
         pps = load_pps(pp_csv)
         tree_id_map, tree_pp_map, tree_cred_map, tree_found_map = build_tree_dicts(
             trees, pps

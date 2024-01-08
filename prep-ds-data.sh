@@ -52,10 +52,10 @@ function prep_ds_data() {
     python add_dummy_branch_lengths.py $cred_nwk $cred_with_fake_branches_nwk
 
     echo "# Calculating pcsp posterior weights via nni_search.py build-pcsp-map..."
-    python nni_search.py build-pcsp-map $fasta $mb_trees $mb_pp $first_nwk -o $pcsp_pp
+    python nni_search.py build-pcsp-map $fasta $mb_trees $mb_pp -o $pcsp_pp
 
     echo "# Calculating credible and posterior subsplits via nni_search.py build-subsplit-map..."
-    python nni_search.py build-subsplit-map $fasta $mb_trees $mb_pp $first_nwk -o $subsplit_path
+    python nni_search.py build-subsplit-map $fasta $mb_trees $mb_pp -o $subsplit_path
 
     echo "# Copying fasta file to local directory..."
     fasta="${golden_path}/ds"$ds"/${prior_type}/ds"$ds".fasta"
@@ -64,8 +64,6 @@ function prep_ds_data() {
     echo "# Finished processing files for ds${ds} in $prior_type."
 }
 
-#scripts_path="/home/drich/matsen-lab/sdag-nni-experiments/scripts"
-#cd $scripts_path
 
 for ds in "${!ds_roots[@]}"; do
   root=${ds_roots[$ds]}
