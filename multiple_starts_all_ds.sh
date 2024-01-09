@@ -22,7 +22,7 @@ function nni_search() {
     result_type=$3
     search=$4
     start_tree_count=$5 
-    max_iter=20
+    max_iter=300
     echo "### nni_search ds=${ds} result_type=${result_type} search=${search}..."
 
     data_path="data/ds${ds}"
