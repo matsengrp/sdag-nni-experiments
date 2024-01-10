@@ -1,0 +1,19 @@
+name: bito
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - ete3
+  - igraph
+  - iqtree
+  - matplotlib
+  - mrbayes
+  - newick_utils
+  - pandas
+  - parallel
+  - pip
+  - pip:
+    - biopython
+    - click
+    - seqmagick
+  - sortedcontainers

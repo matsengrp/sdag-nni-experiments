@@ -25,8 +25,6 @@ from nni_search import (
     update_found_trees,
 )
 
-# This code is based on wtch-investigate-watching-mb.py, of the watching-mb repo.
-
 
 GoldenData = namedtuple("GoldenData", "pp_dict credible_set")
 

@@ -9,22 +9,12 @@ There are several dependencies and requirements before running an nni-search.
 
 First, install bito: [bito](https://github.com/phylovi/bito/tree/main). 
 
-Second, update your bito environment based on the [watching-mb repo](https://github.com/matsengrp/watching-mb).
-The full setup described there is not necessary, but you need to run the commands up to and including
-`scripts/setup.sh`.
-
-That is, move to the watching-mb repo and run the following:
+Second, update your bito environment:
 ```
 conda activate bito
 pip install -e .
 conda env update --file environment.yml
-
-git submodule update --init --recursive
-make -C spr_neighbors
-conda env config vars set WTCH_ROOT=$PWD
 conda activate bito
-
-scripts/setup.sh
 ```
 
 

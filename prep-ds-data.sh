@@ -4,6 +4,7 @@
 declare -A ds_roots=( [1]=15 [3]=7 [4]=8 [5]=1 [6]=6 [7]=7 [8]=4 )
 declare -a prior_types=( "_output" "_exp_output" )
 
+
 function prep_ds_data() {
     ds=$1
     root=$2
@@ -35,14 +36,14 @@ function prep_ds_data() {
     mkdir -p $dest_path
 
     echo "# Processing trprobs file via wtch-process-trprobs.py..."
-    wtch-process-trprobs.py $pre_trprobs $ds $ds $post_trprobs $root $post_pkl
+    python wtch-process-trprobs.py $pre_trprobs $ds $ds $post_trprobs $root $post_pkl
 
     echo "# Unpickling cumulative density via wtch-unpickle-cdf.py..."
-    wtch-unpickle-cdf.py $post_pkl $cred_nwk $mb_trees $mb_pp
+    python wtch-unpickle-cdf.py $post_pkl $cred_nwk $mb_trees $mb_pp
 
     echo "# Obtaining optimal branch lengths for top tree via wtch-branch-optimization.py..."
     head -n 1 $cred_nwk > $top_topology_nwk
-    wtch-branch-optimization.py $top_topology_nwk $fasta $top_tree_nwk --sort=False
+    python wtch-branch-optimization.py $top_topology_nwk $fasta $top_tree_nwk --sort=False
 
     echo "# Rerooting optimized top tree via nw_reroot..."
     nw_reroot $top_tree_nwk $root > $first_nwk

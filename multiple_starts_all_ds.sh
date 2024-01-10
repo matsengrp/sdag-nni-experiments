@@ -35,7 +35,7 @@ function nni_search() {
 
     echo "# Obtaining optimal branch lengths for top trees via wtch-branch-optimization.py..."
     head -n $start_tree_count $cred_nwk > $top_topology_nwk
-    wtch-branch-optimization.py $top_topology_nwk $fasta $top_tree_nwk --sort=True
+    python wtch-branch-optimization.py $top_topology_nwk $fasta $top_tree_nwk --sort=True
     nw_reroot $top_tree_nwk $root > $seed_newick 
 
     credible_newick=${results_path}/ds${ds}.credible.with-fake-branches.nwk
