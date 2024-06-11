@@ -1,452 +1,902 @@
 import sys
-from pathlib import Path
-import bito
+import argparse
 import numpy as np
-import pprint
-import bito.beagle_flags as beagle_flags
-import bito.phylo_model_mapkeys as model_keys
-
-SIMPLE_SPECIFICATION = bito.PhyloModelSpecification(
-    substitution="JC69", site="constant", clock="none"
-)
-
-pp = pprint.PrettyPrinter(indent=4)
+import scipy.stats as ss
+import pandas as pd
+import bito
+import tempfile
+from collections import defaultdict
+import os
+import time
 
 
-def print_dag_stats(inst):
-    dag = inst.get_dag()
-    print("dag: {} {} {}".format(dag.node_count(),
-          dag.edge_count(), dag.taxon_count()))
+verbose = False
 
 
-def print_graft_dag_stats(inst):
-    graft_dag = inst.get_nni_engine().get_graft_dag()
-    print(
-        "graft_dag: {} {}".format(
-            graft_dag.graft_node_count(), graft_dag.graft_edge_count()
+def print_v(*args):
+    """
+    Optional verbose printing.
+    """
+    if verbose:
+        print(*args)
+
+
+def load_dag(fasta_path, newick_path, temp_dir=None):
+    """
+    Create and return a new bito gp_instance and dag from the given fasta and newick
+    files.
+
+    Parameters:
+        fasta_path (str): The path for the fasta file.
+        newick_path (str): The path for the newick file.
+        temp_dir (str): The path of the directory to use when writing the mmap data file
+            of the gp_instance. When None, the data is written to the directory
+            "_ignore". If multiple instances of nni_search run at the same time, they
+            require different paths.
+    """
+    if temp_dir is not None:
+        temp_data_path = os.path.join(temp_dir, "mmap.dat")
+    else:
+        temp_data_path = "_ignore/mmap.data"
+    dag_inst = bito.gp_instance(temp_data_path)
+    dag_inst.read_fasta_file(fasta_path)
+    dag_inst.read_newick_file(newick_path)
+    dag_inst.make_dag()
+    dag = dag_inst.get_dag()
+    return dag_inst, dag
+
+
+def load_trees(fasta_path, newick_path, temp_dir=None):
+    """
+    Create and return a new bito rooted_instance and list of trees from the given fasta
+    and newick files.
+
+    Parameters:
+        fasta_path (str): The path for the fasta file.
+        newick_path (str): The path for the newick file.
+        temp_dir (str): The path of the directory to use as part of the name of the
+            rooted_istance. This might be unnecessary, if there's no actual file.
+    """
+    if temp_dir is not None:
+        temp_data_path = os.path.join(temp_dir, "trees")
+    else:
+        temp_data_path = "trees"
+    tree_inst = bito.rooted_instance(temp_data_path)
+    tree_inst.read_fasta_file(fasta_path)
+    tree_inst.read_newick_file(newick_path)
+    trees = tree_inst.tree_collection.trees
+    return tree_inst, trees
+
+
+def build_and_save_pcsp_pp_map(
+    fasta_path, posterior_newick_path, posterior_probs_path, output_path
+):
+    """
+    Calculate and write to output_path the posterior probabilities, based on those in
+    posterior_probs_path, for the PCSPs in the sDAG spanned by the topologies in
+    posterior_newick_path.
+
+    Parameters:
+        fasta_path (str): The path for the fasta file.
+        posterior_newick_path (str): The path for the newick file of posterior trees.
+        posterior_probs_path (str): The of the csv file of probabilies for the trees of
+            posterior_newick_path.
+        output_path (str): The path to write out the csv of pcsp posterior
+            probabilities.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        print_v("# load dag...")
+        dag_inst, dag = load_dag(fasta_path, posterior_newick_path, temp_dir)
+        print_v("# load trees...")
+        tree_inst, trees = load_trees(fasta_path, posterior_newick_path, temp_dir)
+        print_v("# load pps...")
+        pps = load_pps(posterior_probs_path)
+
+        print_v("# build maps...")
+        tree_id_map, tree_pp_map, tree_cred_map, _ = build_tree_dicts(trees, pps)
+        pcsp_pp_map, pcsp_cred_map = build_pcsp_dicts(
+            dag, tree_id_map, tree_pp_map, tree_cred_map
         )
-    )
+
+        print_v("pcsp_pp_map:", len(pcsp_pp_map))
+        pcsp_dict = {"parent": [], "child": [], "pcsp_pp": [], "in_cred_set": []}
+        for pcsp in pcsp_pp_map:
+            parent = pcsp.pcsp_get_parent_subsplit().subsplit_to_string()
+            child = pcsp.pcsp_get_child_subsplit().subsplit_to_string()
+            pcsp_pp = get_pcsp_pp(pcsp, pcsp_pp_map)
+            is_pcsp_in_cred_set = pcsp_cred_map[pcsp]
+            pcsp_dict["parent"].append(parent)
+            pcsp_dict["child"].append(child)
+            pcsp_dict["pcsp_pp"].append(pcsp_pp)
+            pcsp_dict["in_cred_set"].append(is_pcsp_in_cred_set)
+        df = pd.DataFrame(pcsp_dict)
+        df.to_csv(output_path)
+    return pcsp_pp_map, pcsp_cred_map
 
 
-def print_nni_engine_stats(inst):
-    nni_engine = inst.get_nni_engine()
-    dag = inst.get_dag()
-    print(
-        "iter: {}, adj_count: {}, accepted_count: {} {}, rejected_count: {} {}, topology_count: {}".format(
-            nni_engine.iter_count(),
-            nni_engine.adjacent_nni_count(),
-            nni_engine.accepted_nni_count(),
-            nni_engine.past_accepted_nni_count(),
-            nni_engine.rejected_nni_count(),
-            nni_engine.past_rejected_nni_count(),
-            dag.topology_count(),
-        )
-    )
+def build_and_save_subsplit_map(
+    fasta_path,
+    posterior_newick_path,
+    posterior_probs_path,
+    output_path,
+):
+    """
+    Calculate and write to output_path the credibility of subsplits, based on those in
+    posterior_probs_path, for the subsplits in the sDAG spanned by the topologies in
+    posterior_newick_path.
 
+    Parameters:
+        fasta_path (str): The path for the fasta file.
+        posterior_newick_path (str): The path for the newick file of posterior trees.
+        posterior_probs_path (str): The of the csv file of probabilies for the trees of
+            posterior_newick_path.
+        output_path (str): The path to write out the csv of pcsp posterior
+            probabilities.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        print_v("# load dag...")
+        dag_inst, dag = load_dag(fasta_path, posterior_newick_path, temp_dir)
+        print_v("# load trees...")
+        tree_inst, trees = load_trees(fasta_path, posterior_newick_path, temp_dir)
+        print_v("# load pps...")
+        pps = load_pps(posterior_probs_path)
 
-if len(sys.argv) < 6:
-    print(
-        "Usage: <i:fasta_path> <i:newick_path> <i:temp_dir> <i:test_newick_path> <i:test_posteriors>"
-    )
-    exit()
-fasta_path = Path(sys.argv[1])
-seed_newick_path = Path(sys.argv[2])
-temp_dir = Path(sys.argv[3])
-mmap_path = Path(temp_dir / "mmapped_pv.test.data")
-truth_newick_path = Path(sys.argv[4])
-truth_posterior_path = Path(sys.argv[5])
-truth_mmap_path = Path(temp_dir / "mmapped_pv.truth.data")
+        print_v("# build maps...")
+        tree_id_map, _, tree_cred_map, _ = build_tree_dicts(trees, pps)
+        subsplit_cred_map = build_subsplit_dict(dag, tree_id_map, tree_cred_map)
 
-gp_cutoff_threshold = -20000
-tp_like_cutoff_threshold = -12960
-tp_pars_cutoff_threshold = 0
-
-if not fasta_path.exists():
-    print("<i:fasta_path> does not exist.")
-    exit()
-if not seed_newick_path.exists():
-    print("<i:newick_path> does not exist.")
-    exit()
-if not temp_dir.exists():
-    print("<i:temp_dir> does not exist.")
-    exit()
-if not temp_dir.is_dir():
-    print("<i:temp_dir> is not a directory.")
-    exit()
-if not truth_newick_path.exists():
-    print("<i:test_newick_path> does not exist.")
-    exit()
-
-
-def create_gp_inst(fasta_path_, newick_path_, mmap_path_):
-    # build gp_instance from paths
-    inst = bito.gp_instance(str(mmap_path_))
-    inst.read_fasta_file(str(fasta_path_))
-    inst.read_newick_file(str(newick_path_))
-    return inst
-
-
-def init_gp_inst(inst):
-    inst.make_dag()
-    inst.make_gp_engine()
-    inst.make_tp_engine()
-    inst.make_nni_engine()
-    return
-
-
-def load_test_inst():
-    inst = create_gp_inst(fasta_path, seed_newick_path, mmap_path)
-    init_gp_inst(inst)
-    return inst
-
-
-def load_truth_inst():
-    truth_inst = create_gp_inst(fasta_path, truth_newick_path, truth_mmap_path)
-    init_gp_inst(truth_inst)
-    return truth_inst
-
-
-def load_truth_sbn_inst():
-    truth_sbn_inst = bito.rooted_instance("truth")
-    truth_sbn_inst.read_fasta_file(str(fasta_path))
-    truth_sbn_inst.read_newick_file(str(truth_newick_path))
-    return truth_sbn_inst
-
-
-def load_truth_posterior():
-    posteriors = []
-    with truth_posterior_path.open("r") as fp:
-        for line in fp:
-            posteriors.append(float(line))
-    return posteriors
-
-
-def run_nni_search(inst, truth_sbn_inst, truth_inst):
-    print("=== RUN SEARCH ===")
-    dag = inst.get_dag()
-    nni_engine = inst.get_nni_engine()
-    gp_engine = inst.get_gp_engine()
-    tp_engine = inst.get_tp_engine()
-    graft_dag = nni_engine.get_graft_dag()
-    nni_engine.run_init()
-
-    print("INITIAL:")
-    print_dag_stats(inst)
-    print_graft_dag_stats(inst)
-    print_nni_engine_stats(inst)
-
-    max_iter = 1
-    itr = 0
-    while itr < max_iter:
-        print("iter:", itr, ", adj_nni_count:",
-              nni_engine.adjacent_nni_count())
-        # print(nni_engine.adjacent_nnis())
-        is_adj_valid = []
-        for adj_nni in nni_engine.adjacent_nnis():
-            is_adj_valid.append(
-                graft_dag.get_host_dag().is_valid_add_node_pair(
-                    adj_nni.parent(), adj_nni.child()
-                )
+        with open(output_path, "w") as the_file:
+            header = "subsplit,in_cred_set\n"
+            the_file.write(header)
+            subsplit_lines = (
+                f"{subsplit.subsplit_to_string()},{is_credible}\n"
+                for subsplit, is_credible in subsplit_cred_map.items()
             )
-        print("is_adj_valid:", is_adj_valid)
-        if nni_engine.adjacent_nni_count() <= 0:
-            break
+            the_file.writelines(subsplit_lines)
 
-        print("== MAIN ==")
-        nni_engine.run_main_loop()
-        print_nni_engine_stats(inst)
-        print_dag_stats(inst)
-        print_graft_dag_stats(inst)
-
-        print("NNIS:")
-        pp.pprint(nni_engine.scored_nnis())
-
-        print("== POST ==")
-        nni_engine.run_post_loop()
-
-        print("== FIND TREES ==")
-        find_trees_in_dag(
-            inst.get_dag(), truth_inst.currently_loaded_trees_with_gp_branch_lengths()
-        )
-
-        print("== RESYNC ==")
-        nni_engine.sync_adjacent_nnis_with_dag()
-        print_nni_engine_stats(inst)
-        itr += 1
-
-    print("== FINAL ==")
-    print_dag_stats(inst)
-    print_graft_dag_stats(inst)
-    print_nni_engine_stats(inst)
+    return subsplit_cred_map
 
 
-def run_test_results(inst, truth_sbn_inst, truth_inst):
-    # Check for trees in DAG
-    dag = inst.get_dag()
-    print("== FIND TREES ==")
-    posteriors = load_truth_posterior()
-    contains_trees_in_dag = []
-    tree_count = 0
-    tree_found = 0
-    posterior_found = 0.0
-    for tree in truth_sbn_inst.tree_collection.trees:
-        # print("Tree:", tree.to_newick())
-        contains_tree_in_dag = dag.contains_tree(tree, True)
-        contains_trees_in_dag.append((tree, contains_tree_in_dag))
-        # print("Contains Tree:", contains_tree_in_dag)
-        if contains_tree_in_dag:
-            tree_found += 1
-            # posterior_found += posteriors[tree_count]
-        tree_count += 1
+def load_pps(pp_path):
+    """
+    Returns the list of posterior probabilities in pp_path.
+    """
+    with open(pp_path, "r") as fp:
+        pps = [float(line) for line in fp.readlines()]
+    return pps
 
-    print(
-        "Percent of Support Trees Found:",
-        tree_found,
-        tree_count,
-        float(tree_found) / float(tree_count),
+
+def load_pcsp_pp_map(pcsp_pp_path):
+    """
+    Reads the PCSP data in pcsp_pp_path and returns three default dictionaries. The
+    first is a dictionary mapping a PCSP (as a bito bitset object) to its posterior
+    probability, with default 0.0. The second is a dictionary mapping a PCSP to the
+    truth value for the PCSP appearing in a credible set topology. The third is a
+    default dictionary, with default False, mapping a PCSP to the truth value of the
+    PCSP being found by a search method.
+
+    The purpose of the final dictionary is to take advantage of the fact that the search
+    methods enlarge the sDAG of the previous iteration. Once an edge is found in the
+    sDAG of an iteration of the search, the edge is present in the sDAGs of all future
+    iterations.
+
+    The csv file pcsp_pp_path is expected to have columns "parent", "child", "pcsp_pp",
+    and "in_cred_set", as prepared by the methods build_and_save_pcsp_pp_map and
+    build_and_save_pcsp_pp_map_with_fake_first. Note that since this is loading the data
+    from file, the credible set (95% by default) cannot be changed. I.e., if you want
+    edges with a different cutoff for the cumulative density of the credible set
+    topologies, then you need to rerun build build-pcsp-map.
+    """
+    to_subsplit = lambda clades: bito.subsplit(*clades)
+    to_pcsp = lambda subsplits: bito.pcsp(*subsplits)
+
+    df = pd.read_csv(pcsp_pp_path)
+    parent_clades = df["parent"].str.split(pat="|", expand=True)
+    child_clades = df["child"].str.split(pat="|", expand=True)
+    df["parent"] = parent_clades.apply(to_subsplit, axis=1)
+    df["child"] = child_clades.apply(to_subsplit, axis=1)
+    df["pcsp"] = df[["parent", "child"]].apply(to_pcsp, axis=1)
+    df.set_index("pcsp", inplace=True)
+
+    pcsp_pp_map = defaultdict(float, df["pcsp_pp"].to_dict())
+    pcsp_cred_map = defaultdict(bool, df["in_cred_set"].to_dict())
+    pcsp_found_map = defaultdict(bool, {pcsp: False for pcsp in pcsp_pp_map})
+    return pcsp_pp_map, pcsp_cred_map, pcsp_found_map
+
+
+def load_subsplit_map(subsplit_path):
+    """
+    Reads the subsplit data in subsplit_path and returns two default dictionaries. The
+    first is a dictionary mapping a subsplit (as a bito bitset object) to the truth
+    value for the subsplit appearing in a credible set topology. The second is a
+    default dictionary, with default False, mapping a subsplit to the truth value of the
+    subsplit being found by a search method.
+
+    The purpose of the final dictionary is to take advantage of the fact that the search
+    methods enlarge the sDAG of the previous iteration. Once a subsplit is found in the
+    sDAG of an iteration of the search, the subsplit is present in the sDAGs of all
+    future iterations.
+
+    The csv file should be prepared by the build_and_save_subsplit_map method. If you
+    want subsplits with a different cutoff for the cumulative density of the credible
+    set topologies, then you need to rerun build-subsplit-map.
+    """
+    to_subsplit = lambda x: bito.subsplit(*x.split("|"))
+    with open(subsplit_path) as the_file:
+        # Skip the header.
+        the_file.readline()
+        subsplit_cred_map = {
+            to_subsplit((split := line.split(","))[0]): split[1][0] == "T"
+            for line in the_file.readlines()
+        }
+
+    subsplit_cred_map = defaultdict(bool, subsplit_cred_map)
+    subsplit_found_map = defaultdict(
+        bool, {subsplit: False for subsplit in subsplit_cred_map}
     )
-    print("contains_tree_in_dag:", contains_trees_in_dag)
-
-    # Check for unused nodes and edges in DAG
-    truth_inst.make_dag()
-    truth_dag = truth_inst.get_dag()
-
-    # Check that taxons mapping matches
-    taxon = dag.get_taxon_map()
-    truth_taxon = truth_dag.get_taxon_map()
-    print("Truth Taxons:", truth_taxon)
-    print("Test Taxons:", taxon)
-    for key in taxon.keys():
-        print("Compare Taxons:", key, str(taxon[key]) == str(truth_taxon[key]))
-
-    def node_vector_to_str(my_dag):
-        set_of_nodes = []
-        for node in my_dag.build_sorted_vector_of_node_bitsets():
-            set_of_nodes.append(node.to_string())
-        return set(set_of_nodes)
-
-    nodes = node_vector_to_str(dag)
-    truth_nodes = node_vector_to_str(truth_dag)
-    extra_nodes = nodes.difference(truth_nodes)
-    missed_nodes = truth_nodes.difference(nodes)
-    print("node counts:", dag.node_count(), truth_dag.node_count())
-    print("extra_nodes:", len(extra_nodes))
-    print("missed_nodes:", len(missed_nodes))
-
-    def edge_vector_to_str(my_dag):
-        set_of_edges = []
-        for edge in my_dag.build_sorted_vector_of_edge_bitsets():
-            set_of_edges.append(edge.to_string())
-        return set(set_of_edges)
-
-    edges = edge_vector_to_str(dag)
-    truth_edges = edge_vector_to_str(truth_dag)
-    extra_edges = edges.difference(truth_edges)
-    missed_edges = truth_edges.difference(edges)
-    print("edge counts:", dag.edge_count(), truth_dag.edge_count())
-    print("extra_edges:", len(extra_edges))
-    print("missed_edges:", len(missed_edges))
+    return subsplit_cred_map, subsplit_found_map
 
 
-def calc_top_trees(fasta_path_, newick_path_, mmap_path_):
-    print("=== build engines ===")
-    inst = create_gp_inst(fasta_path_, newick_path_, mmap_path_)
-    # inst.estimate_branch_lengths(1e-4, 100)
-    inst.take_first_branch_length()
-    dag = inst.get_dag()
-    tp_engine = inst.get_tp_engine()
-    # like_tree_engine = inst.get_likelihood_tree_engine()
-    # pars_tree_engine = inst.get_parsimony_tree_engine()
-    print("=== tree scores [BEGIN] ===")
-    print("edge_count:", tp_engine.edge_count())
-    for i in range(tp_engine.edge_count()):
-        edge_id = bito.edge_id(i)
-        tree = tp_engine.get_top_tree_with_edge(edge_id)
-        print("branch_lengths:", np.array(tree.branch_lengths))
-        likelihood_score = 0
-        # likelihood_score = inst.compute_tree_likelihood(tree)
-        parsimony_score = inst.compute_tree_parsimony(tree)
-        print(
-            "edge_id:",
-            edge_id,
-            "likelihood_score:",
-            likelihood_score,
-            "parsimony_score:",
-            parsimony_score,
+def build_tree_dicts(trees, pps, cred_pp=0.95):
+    """
+    Given a list of bito RootedTrees and list of posterior probabilities of those trees,
+    returns four dictionaries. The first is simply a dictionary mapping the list index
+    to the corresponding RootedTree, with the list index considered as the tree_id.
+    The second is a default dictionary mapping a tree_id to the posterior probability,
+    with default 0.0. The third is a default dictionary mapping a tree_id to the truth
+    value of the tree being in the credible set, with default False. This credible set
+    is the 95% credible set by default, but the user may specify another value. The
+    fourth is a default dictionary, with default False, mapping a tree_id to the truth
+    value of the tree being found by a search method.
+
+    The purpose of the final dictionary is to take advantage of the fact that the search
+    methods enlarge the sDAG of the previous iteration. Once a tree is found in the sDAG
+    of an iteration of the search, the tree is present in the sDAGs of all future
+    iterations.
+
+    Parameters:
+        trees (list): The list of bito RootedTrees.
+        pps (list): The list of posterior probabilities.
+        cred_pp (float): The credible set cumulative density.
+    """
+    tree_id_map = dict(enumerate(trees))
+    tree_pp_map = defaultdict(float, zip(tree_id_map, pps))
+    in_credible_set = np.cumsum(pps) <= cred_pp
+    tree_cred_map = defaultdict(bool, enumerate(in_credible_set))
+    tree_found_map = defaultdict(bool, {j: False for j in tree_id_map})
+
+    return tree_id_map, tree_pp_map, tree_cred_map, tree_found_map
+
+
+def build_pcsp_dicts(dag, tree_id_map, tree_pp_map, tree_cred_map):
+    """
+    Given a bito dag and tree dictionaries, this method constructs and returns the two
+    dictionaries mapping the PCSPs (as bito bitsets) of the dag to posterior
+    probabilities and truth value of membership of the credible set.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        tree_id_map (dict): The dictionary mapping tree_id to bito RootedTree.
+        tree_pp_map (dict): The dictionary mapping tree_id to posterior probability.
+        tree_cred_map (dict): The dictionary mapping tree_id to truth value of
+            membership of the credible set.
+    """
+    dag_pcsps = dag.build_set_of_edge_bitsets()
+    pcsp_pp_map = defaultdict(float, {pcsp: 0.0 for pcsp in dag_pcsps})
+    pcsp_cred_map = defaultdict(bool, {pcsp: False for pcsp in dag_pcsps})
+
+    n_taxa = dag.taxon_count()
+    top_subsplit = bito.subsplit("0" * n_taxa, "1" * n_taxa)
+    make_root_pcsp = lambda tree: bito.pcsp(top_subsplit, tree.build_subsplit())
+
+    for tree_id, pp in tree_pp_map.items():
+        tree = tree_id_map[tree_id]
+        is_credible = tree_cred_map[tree_id]
+        tree_pcsps = tree.build_set_of_pcsps()
+        tree_pcsps.add(make_root_pcsp(tree))
+        for pcsp in tree_pcsps:
+            pcsp_pp_map[pcsp] += pp
+            if is_credible:
+                pcsp_cred_map[pcsp] = True
+    return pcsp_pp_map, pcsp_cred_map
+
+
+def build_subsplit_dict(dag, tree_id_map, tree_cred_map):
+    """
+    Given a bito dag and tree dictionaries, this method constructs and returns the
+    dictionary mapping the subsplits (as bito bitsets) of the dag to truth values for
+    membership of the credible set.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        tree_id_map (dict): The dictionary mapping tree_id to bito RootedTree.
+        tree_cred_map (dict): The dictionary mapping tree_id to truth value of
+            membership of the credible set.
+    """
+
+    sdag_nodes = dag.build_set_of_node_bitsets()
+    subsplit_cred_map = defaultdict(bool, {node: False for node in sdag_nodes})
+
+    n_taxa = dag.taxon_count()
+    root = bito.subsplit("0" * n_taxa, "1" * n_taxa)
+    subsplit_cred_map[root] = True
+
+    for tree_id, is_credible in tree_cred_map.items():
+        if is_credible:
+            tree = tree_id_map[tree_id]
+            tree_nodes = tree.build_set_of_subsplits()
+            for node in tree_nodes:
+                subsplit_cred_map[node] = True
+    return subsplit_cred_map
+
+
+def get_pcsp_pp(nni, pcsp_pp_map):
+    """Returns the posterior probability of the PCSP associated to the NNI."""
+    pcsp = nni.get_central_edge_pcsp() if type(nni) == bito.nni_op else nni
+    return pcsp_pp_map[pcsp]
+
+
+def get_pcsp_pp_rank(best_nni, scored_nnis, pcsp_pp_map):
+    best_pcsp_pp = get_pcsp_pp(best_nni, pcsp_pp_map)
+    pcsp_pp_rank = 0
+    for nni in scored_nnis:
+        nni_pcsp = get_pcsp_pp(nni, pcsp_pp_map)
+        if nni_pcsp > best_pcsp_pp:
+            pcsp_pp_rank += 1
+    return pcsp_pp_rank
+
+
+def get_credible_edge_count(pcsp_cred_map, pcsp_found_map):
+    """
+    Returns the number of sdag edges that are in topologies of the credible set and marked as found.
+    """
+    return sum((pcsp_cred_map[pcsp] for pcsp, found in pcsp_found_map.items() if found))
+
+
+def get_posterior_edge_count(pcsp_found_map):
+    """
+    Returns the number of sdag edges that are in topologies of the posterior and marked as found.
+    """
+    return sum(pcsp_found_map.values())
+
+
+def get_credible_subsplit_count(subsplit_cred_map, subsplit_found_map):
+    """
+    Returns the number of sdag nodes or subsplits that are in topologies of the credible set and marked as found.
+    """
+    return sum(
+        (subsplit_cred_map[node] for node, found in subsplit_found_map.items() if found)
+    )
+
+
+def get_posterior_subsplit_count(subsplit_found_map):
+    """
+    Returns the number of sdag nodes or subsplits that are in topologies of the posterior and marked as found.
+    """
+    return sum(subsplit_found_map.values())
+
+
+def get_tree_pp(tree_pp_map, tree_found_map):
+    """
+    Returns the cumulative posterior probabilities of trees marked as found.
+    """
+    dag_pp = sum(
+        (tree_pp_map[tree_id] for tree_id, found in tree_found_map.items() if found)
+    )
+    return dag_pp
+
+
+def get_credible_tree_count(tree_cred_map, tree_found_map):
+    """
+    Returns the count of topologies in the credible set that are marked as found.
+    """
+    cred_tree_count = sum(
+        (
+            1
+            for tree_id, cred in tree_cred_map.items()
+            if cred and tree_found_map[tree_id]
         )
-    print("=== tree scores [END] ===")
+    )
+    return cred_tree_count
 
 
-def calc_ranked_list(fasta_path_, newick_path_, mmap_path_):
-    print("=== build engines ===")
-    inst = create_gp_inst(fasta_path_, newick_path_, mmap_path_)
-    # inst.estimate_branch_lengths(1e-4, 100)
-    inst.take_first_branch_length()
-    tree_collection = inst.currently_loaded_trees_with_gp_branch_lengths()
-    print("branch_lengths:", np.array(inst.get_branch_lengths))
-    tree_counter = 0
-    for tree in tree_collection.trees:
-        # print("tree:", tree_counter, tree.to_newick())
-        # print("branch_lengths:", np.array(tree.branch_lengths))
-        likelihood_score = inst.compute_tree_likelihood(tree)
-        parsimony_score = inst.compute_tree_parsimony(tree)
-        print(
-            "tree_counter:",
-            tree_counter,
-            "likelihood_score:",
-            likelihood_score,
-            "parsimony_score:",
-            parsimony_score,
+def update_found_trees(dag, tree_id_map, tree_found_map):
+    """
+    Updates the tree_found_map dictionary to mark as found the trees of tree_id_map
+    contained in the dag. Additionally, this method returns a list of tree_ids for the
+    trees found in the dag that were not found previously.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        tree_id_map (dict): The dictionary mapping tree_id to bito RootedTree.
+        tree_found_map (dict): The dictionary mapping tree_id to truth value of the
+            tree being already found.
+    """
+    in_dag = lambda tree_id: dag.contains_tree(tree_id_map[tree_id])
+    newly_found_tree_ids = [
+        tree_id
+        for tree_id, found in tree_found_map.items()
+        if not found and in_dag(tree_id)
+    ]
+    for tree_id in newly_found_tree_ids:
+        tree_found_map[tree_id] = True
+    return newly_found_tree_ids
+
+
+def update_found_edges(dag, pcsp_found_map):
+    """
+    Updates the pcsp_found_map dictionary to mark as found the edges contained in the
+    dag.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        pcsp_found_map (dict): The dictionary mapping a PCSP to truth value of the PCSP
+            being already found.
+    """
+    pcsps = dag.build_set_of_edge_bitsets()
+    newly_found_pcsps = (
+        pcsp for pcsp, found in pcsp_found_map.items() if not found and pcsp in pcsps
+    )
+    for pcsp in newly_found_pcsps:
+        pcsp_found_map[pcsp] = True
+    return None
+
+
+def update_found_nodes(dag, subsplit_found_map):
+    """
+    Updates the subsplit_found_map dictionary to mark as found the subsplits contained
+    in the dag.
+
+    Parameters:
+        dag (bito.dag): The sDAG.
+        subsplit_found_map (dict): The dictionary mapping a subsplit to truth value of
+            the subsplit being already found.
+    """
+    nodes = dag.build_set_of_node_bitsets()
+    newly_found_nodes = (
+        node
+        for node, found in subsplit_found_map.items()
+        if not found and node in nodes
+    )
+    for node in newly_found_nodes:
+        subsplit_found_map[node] = True
+    return None
+
+
+def build_ranked_list(list):
+    total_list = [len(list)] * len(list)
+    rank_list = total_list - ss.rankdata(list, method="ordinal")
+    return rank_list
+
+
+def init_engine_for_gp_search(dag_inst, args):
+    """
+    Initialize the generalized-pruning search engine based on command line arguments.
+    """
+    dag_inst.make_gp_engine()
+    dag_inst.make_nni_engine()
+    dag_inst.take_first_branch_length()
+    nni_engine = dag_inst.get_nni_engine()
+    nni_engine.set_include_rootsplits(args.include_rootsplits)
+    nni_engine.set_gp_likelihood_cutoff_filtering_scheme(0.0)
+    nni_engine.set_top_k_score_filtering_scheme(1)
+    if args.use_cutoff:
+        nni_engine.set_gp_likelihood_cutoff_filtering_scheme(args.threshold)
+    if args.use_dropoff:
+        nni_engine.set_gp_likelihood_drop_filtering_scheme(args.threshold)
+    if args.use_top_n:
+        nni_engine.set_top_n_score_filtering_scheme(args.top_n)
+    # dag_inst.estimate_branch_lengths(1e-5, 10, True)
+
+
+def init_engine_for_tp_search(dag_inst, args):
+    """Initialize the top-pruning search engine based on command line arguments."""
+    dag_inst.make_tp_engine()
+    dag_inst.make_nni_engine()
+    dag_inst.tp_engine_set_branch_lengths_by_taking_first()
+    dag_inst.tp_engine_set_choice_map_by_taking_first()
+    nni_engine = dag_inst.get_nni_engine()
+    nni_engine.set_include_rootsplits(args.include_rootsplits)
+    nni_engine.set_tp_likelihood_cutoff_filtering_scheme(0.0)
+    nni_engine.set_top_k_score_filtering_scheme(1)
+    if args.use_cutoff:
+        nni_engine.set_tp_likelihood_cutoff_filtering_scheme(args.threshold)
+    if args.use_dropoff:
+        nni_engine.set_tp_likelihood_drop_filtering_scheme(args.threshold)
+    if args.use_top_n:
+        nni_engine.set_top_n_score_filtering_scheme(args.top_n)
+
+
+def init_results_file(
+    file_path,
+    dag,
+    tree_id_map,
+    tree_pp_map,
+    tree_cred_map,
+    tree_found_map,
+    pcsp_cred_map,
+    pcsp_found_map,
+    subsplit_cred_map,
+    subsplit_found_map,
+):
+    """
+    Create a csv file at file_path and writes to this file the header line and sdag
+    stats for iteration 0 of an nni-search.
+    """
+    tree_count = int(dag.topology_count())
+    node_count = dag.node_count()
+    edge_count = dag.edge_count()
+    posterior_tree_ids = update_found_trees(dag, tree_id_map, tree_found_map)
+    posterior_tree_ids = f'"{posterior_tree_ids}"'
+    tree_pp = get_tree_pp(tree_pp_map, tree_found_map)
+    cred_tree_count = get_credible_tree_count(tree_cred_map, tree_found_map)
+
+    update_found_edges(dag, pcsp_found_map)
+    cred_edge_count = get_credible_edge_count(pcsp_cred_map, pcsp_found_map)
+    posterior_edge_count = get_posterior_edge_count(pcsp_found_map)
+
+    update_found_nodes(dag, subsplit_found_map)
+    cred_node_count = get_credible_subsplit_count(subsplit_cred_map, subsplit_found_map)
+    posterior_node_count = get_posterior_subsplit_count(subsplit_found_map)
+
+    header = "iter,acc_nni_id,acc_nni_count,score,tree_pp,pcsp_pp,pcsp_pp_rank,"
+    header += "node_count,cred_node_count,posterior_node_count,edge_count,"
+    header += "cred_edge_count,posterior_edge_count,tree_count,cred_tree_count,"
+    header += "posterior_tree_ids,adj_nni_count,new_nni_count,llhs_computed,parent,"
+    header += "child\n"
+    first_row = f"0,,0,,{tree_pp},,,{node_count},{cred_node_count},"
+    first_row += f"{posterior_node_count},{edge_count},{cred_edge_count},"
+    first_row += f"{posterior_edge_count},{tree_count},{cred_tree_count},"
+    first_row += f"{posterior_tree_ids},0,0,0,,\n"
+    with open(file_path, "w") as the_file:
+        the_file.write(header)
+        the_file.write(first_row)
+    return None
+
+
+def write_results_line(file_path, *args):
+    """
+    Appends a line of sdag stats to the csv at file_path.
+    """
+    with open(file_path, "a") as the_file:
+        the_file.write(",".join(map(str, args)) + "\n")
+    return None
+
+
+def nni_search(args):
+    """
+    Perform an nni-search based on command line arguments.
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        start_time = time.time()
+
+        print("nni_search")
+        print_v("# load trees...")
+        tree_inst, trees = load_trees(args.fasta, args.posterior_newick, temp_dir)
+
+        print_v("# load pps...")
+        pps = load_pps(args.pp_csv)
+
+        print_v("# build maps...")
+        tree_id_map, tree_pp_map, tree_cred_map, tree_found_map = build_tree_dicts(
+            trees, pps
         )
-        tree_counter += 1
+        pcsp_pp_map, pcsp_cred_map, pcsp_found_map = load_pcsp_pp_map(args.pcsp_pp_csv)
+        subsplit_cred_map, subsplit_found_map = load_subsplit_map(args.subsplit_csv)
+
+        print_v("# load dag...")
+        dag_inst, dag = load_dag(args.fasta, args.seed_newick, temp_dir)
+        dag.fully_connect()
+
+        print_v("# init engine...")
+        if args.tp:
+            init_engine_for_tp_search(dag_inst, args)
+        if args.gp:
+            init_engine_for_gp_search(dag_inst, args)
+        nni_engine = dag_inst.get_nni_engine()
+        nni_engine.run_init(True)
+
+        init_results_file(
+            args.output,
+            dag,
+            tree_id_map,
+            tree_pp_map,
+            tree_cred_map,
+            tree_found_map,
+            pcsp_cred_map,
+            pcsp_found_map,
+            subsplit_cred_map,
+            subsplit_found_map,
+        )
+
+        log_iteration_frequency = args.log_freq
+
+        prev_nni_count = 0
+        llhs_computed = 0
+        current_time = time.time() - start_time
+        iteration_times = [(0, current_time)]
+        for iter_count in range(1, args.iter_max + 1):
+            # run iteration of search
+            log_this_iter = (iter_count % log_iteration_frequency) == 0
+
+            print_v(f"\n# iter_count: {iter_count} of {args.iter_max}...")
+            print_v(f"# dag: {dag.node_count()} nodes, {dag.edge_count()} edges")
+
+            if not args.pcsp:
+                nni_engine.run_main_loop()
+                scored_nnis = nni_engine.scored_nnis()
+                accepted_nni_count = len(nni_engine.accepted_nnis())
+                print_v("# scored_nnis:", len(scored_nnis))
+                print_v("# accepted_nnis:", nni_engine.accepted_nni_count())
+            else:
+                raise NotImplementedError()
+                # Old code block for choosing the highest posterior density nni.
+                # We could re-implement this if we want...
+
+            # add entry to final data
+            new_nni_count = nni_engine.scored_nni_count() - prev_nni_count
+
+            if args.tp:
+                llhs_computed += new_nni_count
+            if args.gp:
+                llhs_computed += len(scored_nnis)
+
+            if log_this_iter:
+                if args.log_time_only:
+                    current_time = time.time() - start_time
+                    iteration_times.append((iter_count, current_time))
+                else:
+                    tree_count = int(dag.topology_count())
+                    node_count = dag.node_count()
+                    edge_count = dag.edge_count()
+
+                    posterior_tree_ids = update_found_trees(
+                        dag, tree_id_map, tree_found_map
+                    )
+                    posterior_tree_ids = f'"{posterior_tree_ids}"'
+                    tree_pp = get_tree_pp(tree_pp_map, tree_found_map)
+                    cred_tree_count = get_credible_tree_count(
+                        tree_cred_map, tree_found_map
+                    )
+                    update_found_edges(dag, pcsp_found_map)
+                    cred_edge_count = get_credible_edge_count(
+                        pcsp_cred_map, pcsp_found_map
+                    )
+                    posterior_edge_count = get_posterior_edge_count(pcsp_found_map)
+                    update_found_nodes(dag, subsplit_found_map)
+                    cred_node_count = get_credible_subsplit_count(
+                        subsplit_cred_map, subsplit_found_map
+                    )
+                    posterior_node_count = get_posterior_subsplit_count(
+                        subsplit_found_map
+                    )
+
+                    adjacent_nni_count = nni_engine.adjacent_nni_count()
+                    print_v("# dag_tree_pp:", tree_pp)
+
+                    for nni_id, nni in enumerate(nni_engine.accepted_nnis()):
+                        pcsp_pp = get_pcsp_pp(nni, pcsp_pp_map)
+                        pcsp_pp_rank = get_pcsp_pp_rank(nni, scored_nnis, pcsp_pp_map)
+                        parent = nni.get_parent().subsplit_to_string()
+                        child = nni.get_child().subsplit_to_string()
+
+                        write_results_line(
+                            args.output,
+                            iter_count,
+                            nni_id,
+                            accepted_nni_count,
+                            scored_nnis[nni],
+                            tree_pp,
+                            pcsp_pp,
+                            pcsp_pp_rank,
+                            node_count,
+                            cred_node_count,
+                            posterior_node_count,
+                            edge_count,
+                            cred_edge_count,
+                            posterior_edge_count,
+                            tree_count,
+                            cred_tree_count,
+                            posterior_tree_ids,
+                            adjacent_nni_count,
+                            new_nni_count,
+                            llhs_computed,
+                            parent,
+                            child,
+                        )
+
+            # bookkeeping post iteration
+            if len(nni_engine.accepted_nnis()) == 0:
+                print_v("# NO ACCEPTED NNIS")
+                break
+            nni_engine.run_post_loop()
+            prev_nni_count = nni_engine.scored_nni_count()
+        print_v(f"# final dataframe written to {args.output}")
+
+        if args.log_time_only:
+            with open(args.output, "w") as the_file:
+                the_file.write("iter,time\n")
+                for iter, seconds in iteration_times:
+                    the_file.write(f"{iter},{seconds}\n")
+    return None
 
 
-def find_trees_in_dag(dag, tree_collection):
-    tree_counter = 0
-    trees_found = 0
-    for tree in tree_collection.trees:
-        contains_tree = dag.contains_tree(tree, True)
-        if contains_tree:
-            trees_found += 1
-        # print("tree_counter:", tree_counter, "contains_tree:", contains_tree)
-        tree_counter += 1
-    print("trees_found:", trees_found, "of", tree_counter)
-    return trees_found / tree_counter
+############
+### MAIN ###
+############
 
 
-def run_nni_expansion_until_all_trees_found(fasta_path_, newick_path_, mmap_path_, final_newick_path_):
-    print("=== RUN_NNI_EXPANSION ===")
-    print("=== load ===")
-    inst = create_gp_inst(fasta_path_, newick_path_, mmap_path_)
-    init_gp_inst(inst)
-    nni_engine = inst.get_nni_engine()
-    nni_engine.set_no_filter(True)
-    tp_engine = inst.get_tp_engine()
-    dag = inst.get_dag()
+def main_arg_parse(args):
+    parser = argparse.ArgumentParser(
+        description="Tools for performing NNI systematic search."
+    )
+    parser.add_argument("-v", "--verbose", help="verbose", type=int, default=1)
+    parser.add_argument("-p", "--profiler", action="store_true", help="profile program")
+    subparsers = parser.add_subparsers(title="programs", dest="program")
 
-    truth_sbn_inst = bito.rooted_instance("truth")
-    truth_sbn_inst.read_fasta_file(str(fasta_path_))
-    truth_sbn_inst.read_newick_file(str(final_newick_path_))
+    # nni search
+    subparser1 = subparsers.add_parser(
+        "nni-search", help="Perform systematic NNI search."
+    )
+    subparser1.add_argument("fasta", help="fasta file", type=str)
+    subparser1.add_argument(
+        "seed_newick", help="newick file for initial trees in DAG", type=str
+    )
+    subparser1.add_argument(
+        "credible_newick", help="newick file for trees in credible posterior", type=str
+    )
+    subparser1.add_argument(
+        "posterior_newick",
+        help="newick file for trees in empirical posterior",
+        type=str,
+    )
+    subparser1.add_argument(
+        "pp_csv",
+        help="csv file containing the posterior weights of the trees from credible_trees",
+        type=str,
+    )
+    subparser1.add_argument(
+        "pcsp_pp_csv",
+        help="csv file containing the per-PCSP posterior weights",
+        type=str,
+    )
+    subparser1.add_argument(
+        "subsplit_csv",
+        help="csv file containing the posterior and credible subsplits",
+        type=str,
+    )
+    # search method group
+    group = subparser1.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--gp",
+        action="store_true",
+        help="Selects best NNI according to Generalized Pruning.",
+    )
+    group.add_argument(
+        "--tp",
+        action="store_true",
+        help="Selects best NNI according to Top Pruning via Likelihood.",
+    )
+    group.add_argument(
+        "--pcsp",
+        action="store_true",
+        help="Selects best NNI according to per-PCSP cumulative posterior.",
+    )
+    # search scheme group
+    group = subparser1.add_mutually_exclusive_group(required=False)
+    group.add_argument(
+        "--use-top-n", action="store_true", help="Selects the top N scoring NNIs."
+    )
+    group.add_argument(
+        "--use-cutoff",
+        action="store_true",
+        help="Selects all NNIs scoring above a given threshold.",
+    )
+    group.add_argument(
+        "--use-dropoff",
+        action="store_true",
+        help="Selects all NNIs scoring above a given dropoff below best NNI.",
+    )
+    # search scheme arguments
+    subparser1.add_argument(
+        "--top-n", help="number of NNIs to accept per iteration", type=int, default=1
+    )
+    subparser1.add_argument(
+        "--threshold", help="cutoff/dropoff threshold", type=float, default=0.0
+    )
+    # options
+    subparser1.add_argument(
+        "-o", "--output", help="output file", type=str, default="results.nni_search.csv"
+    )
+    subparser1.add_argument(
+        "--iter-max", help="number of NNI search iterations", type=int, default=10
+    )
+    subparser1.add_argument(
+        "--log-freq", help="frequency to log stats for the search", type=int, default=1
+    )
+    subparser1.add_argument(
+        "--log-time-only",
+        help="log run-time and no other statistics",
+        action="store_true",
+    )
+    subparser1.add_argument(
+        "--include-rootsplits",
+        action="store_true",
+        help="Whether to include rootsplits in NNI search",
+    )
 
-    iterations = 0
-    found_all_trees = False
+    # pcsp map builder
+    subparser2 = subparsers.add_parser("build-pcsp-map", help="Build per-PCSP map.")
+    subparser2.add_argument("fasta", help="fasta file", type=str)
+    subparser2.add_argument(
+        "posterior_newick",
+        help="newick file for trees in empirical posterior",
+        type=str,
+    )
+    subparser2.add_argument(
+        "pp_csv",
+        help="csv file containing the posterior weights of the trees from posterior_newick",
+        type=str,
+    )
+    # options
+    subparser2.add_argument(
+        "-o",
+        "--output",
+        help="output file",
+        type=str,
+        default="results.pcsp_pp_map.csv",
+    )
 
-    print("=== begin search ===")
-    while not found_all_trees:
-        iterations += 1
-        print("dag:", dag.node_count(), dag.edge_count())
-        print("iterations:", iterations)
-        nni_engine.sync_adjacent_nnis_with_dag()
-        print("adj_nnis:", nni_engine.adjacent_nni_count())
-        nni_engine.filter_eval_adjacent_nnis()
-        nni_engine.filter_process_adjacent_nnis()
-        nni_engine.add_accepted_nnis_to_dag()
-        print("check_trees:")
-        perc_trees_found = find_trees_in_dag(
-            dag, truth_sbn_inst.tree_collection)
-        print("perc_trees_found:", perc_trees_found)
-        if (perc_trees_found == 1.0):
-            found_all_trees = True
-    print("=== end search ===")
+    # subsplit map builder
+    subparser3 = subparsers.add_parser("build-subsplit-map", help="Build subsplit map.")
+    subparser3.add_argument("fasta", help="fasta file", type=str)
+    subparser3.add_argument(
+        "posterior_newick",
+        help="newick file for trees in empirical posterior",
+        type=str,
+    )
+    subparser3.add_argument(
+        "pp_csv",
+        help="csv file containing the posterior weights of the trees from posterior_newick",
+        type=str,
+    )
+    # options
+    subparser3.add_argument(
+        "-o",
+        "--output",
+        help="output file",
+        type=str,
+        default="results.subsplit_node_map.csv",
+    )
+    # run parser
+    parsed_args = parser.parse_args(args)
+    args_dict = vars(parsed_args)
+    return parsed_args
 
 
-# run_nni_expansion_until_all_trees_found(
-#     fasta_path, seed_newick_path, mmap_path, truth_newick_path)
-# exit()
-
-print("=== LOAD DATA ===")
-inst = load_test_inst()
-truth_sbn_inst = load_truth_sbn_inst()
-truth_inst = load_truth_inst()
-posteriors = load_truth_posterior()
-dag = inst.get_dag()
-nni_engine = inst.get_nni_engine()
-tp_engine = inst.get_tp_engine()
-
-print("=== SET BRANCH LENGTHS ===")
-inst.take_first_branch_length()
-truth_inst.take_first_branch_length()
-
-nni_engine = inst.get_nni_engine()
-nni_engine.set_gp_likelihood_cutoff_filtering_scheme(gp_cutoff_threshold)
-# nni_engine.set_tp_likelihood_cutoff_filtering_scheme(tp_like_cutoff_threshold)
-# nni_engine.set_tp_parsimony_cutoff_filtering_scheme(tp_pars_cutoff_threshold)
-
-print("=== FIND TREES ===")
-perc_trees_found = find_trees_in_dag(
-    inst.get_dag(), truth_inst.currently_loaded_trees_with_gp_branch_lengths()
-)
-print("perc_trees_found:", perc_trees_found)
-
-# dag = inst.get_dag()
-# nni_engine = inst.get_nni_engine()
-# tp_engine = inst.get_tp_engine()
-# # nni_engine.run_init()
-# scored_nnis = nni_engine.past_scored_nnis()
-# print("dag:", dag.node_count(), dag.edge_count())
-# for i in range(dag.edge_count()):
-#     edge_id = bito.edge_id(i)
-#     top_tree = tp_engine.get_top_tree_with_edge(edge_id)
-#     likelihood = inst.compute_tree_likelihood(top_tree)
-#     parsimony = inst.compute_tree_parsimony(top_tree)
-#     score = tp_engine.get_top_tree_likelihood_with_edge(edge_id)
-#     print(
-#         "nni: edge_id: {}, score: {}, likelihood: {}, parsimony: {}".format(
-#             edge_id, score, likelihood, parsimony
-#         )
-#     )
-
-# print("=== NNI SEARCH ===")
-# run_nni_search(inst, truth_sbn_inst, truth_inst)
-# run_test_results(inst, truth_sbn_inst, truth_inst)
-
-print("=== FIND TREES ===")
-find_trees_in_dag(
-    inst.get_dag(), truth_inst.currently_loaded_trees_with_gp_branch_lengths()
-)
-
-unique_trees = tp_engine.build_vector_of_unique_top_trees()
-print("unique_trees:", len(unique_trees))
-counter = 0
-for tree in unique_trees:
-    print(tree.to_newick_topology())
-
-loaded_trees = truth_inst.currently_loaded_trees_with_gp_branch_lengths().trees
-print("loaded_trees:", len(loaded_trees))
-for tree in loaded_trees:
-    likelihood = inst.compute_tree_likelihood(tree)
-    parsimony = inst.compute_tree_parsimony(tree)
-    print("likelihood:", likelihood, "parsimony:", parsimony)
-    # print(tree.to_newick_topology())
-
-# trees_found = 0
-# for top_tree in unique_trees:
-#     for loaded_tree in loaded_trees:
-#         if top_tree == loaded_tree:
-#             likelihood = inst.compute_tree_likelihood(top_tree)
-#             parsimony = inst.compute_tree_parsimony(top_tree)
-#             print("likelihood:", likelihood, "parsimony:", parsimony)
-#             trees_found += 1
-
-print("loaded_trees_found:", trees_found)
-
-print("=== COMPARE SCORES ===")
-# nni_engine.run_init()
-scored_nnis = nni_engine.past_scored_nnis()
-
-print("dag:", dag.node_count(), dag.edge_count())
-for i in range(dag.edge_count()):
-    edge_id = bito.edge_id(i)
-    nni = dag.get_nni(edge_id)
-    for other_nni in scored_nnis.keys():
-        if nni.compare(other_nni):
-            top_tree = tp_engine.get_top_tree_with_edge(edge_id)
-            likelihood = inst.compute_tree_likelihood(top_tree)
-            parsimony = inst.compute_tree_parsimony(top_tree)
-            score = tp_engine.get_top_tree_likelihood_with_edge(edge_id)
-            # adj_score = scored_nnis[nni]
-            print(
-                "nni: edge_id: {}, score: {}, likelihood: {}, parsimony: {}".format(
-                    edge_id, score, likelihood, parsimony
-                )
-            )
+if __name__ == "__main__":
+    print_v("# begin...")
+    args = main_arg_parse(sys.argv[1:])
+    verbose = args.verbose > 0
+    if args.program == "nni-search":
+        if args.tp:
+            nni_search(args)
+        if args.gp:
+            nni_search(args)
+        if args.pcsp:
+            nni_search(args)
+    if args.program == "build-pcsp-map":
+        build_and_save_pcsp_pp_map(
+            args.fasta,
+            args.posterior_newick,
+            args.pp_csv,
+            args.output,
+        )
+    if args.program == "build-subsplit-map":
+        build_and_save_subsplit_map(
+            args.fasta,
+            args.posterior_newick,
+            args.pp_csv,
+            args.output,
+        )
+    print_v("# ...done")

@@ -1,0 +1,14 @@
+execute /fh/fast/matsen_e/shared/vip/ds-golden/data/DS{{ds}}.n.nex;
+
+begin trees;
+  tree starttree = {{starttree}}
+end;
+
+begin mrbayes;
+    set autoclose=yes nowarn=yes seed=8675 swapseed=309;
+    lset nst=1 rates=equal;
+    prset statefreqpr=fixed(equal) topologypr=uniform brlenspr={{brlenspr}};
+    mcmcp nruns=1 nchains=4 ngen={{generations}} samplefreq=1 printfreq=1000 diagnfreq=1 file=ds{{ds}};
+    startvals tau = starttree V = starttree;
+    mcmc;
+end;
